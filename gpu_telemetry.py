@@ -364,7 +364,7 @@ def read_lhm():
                 "temp": g.get("temp_c"),
                 "power": g.get("power_w"),
             })
-    host = {"cpu": m.get("cpu", {}), "ram": m.get("ram", {}),
+    host = {"cpus": m.get("cpus", []]), "ram": m.get("ram", {}),
             "disks": m.get("disks", [])}
     return gpus, host
 
@@ -408,8 +408,12 @@ def publish_host(client, host):
     # uids and topics (so single-socket boxes don't churn); extra sockets
     # become cpu1_*, cpu2_*, ... Friendly names carry an index only when
     # there's more than one socket.
-    cpus = host.get("cpus") or ([host["cpu"]] if host.get("cpu") else [])
+    cpus = host.get("cpus") or []
     multi = len(cpus) > 1
+    print(f"[cpus] publish_host received {len(cpus)} socket(s); multi={multi}; "
+          f"names={[c.get('name') for c in cpus]}; "
+          f"powers={[c.get('power_w') for c in cpus]}",
+          file=sys.stderr, flush=True)
     for i, cpu in enumerate(cpus):
         pfx = "cpu" if i == 0 else f"cpu{i}"
         label = f"CPU{i}" if multi else "CPU"
