@@ -8,8 +8,15 @@ power draw (W). Plus a per-GPU text sensor listing loaded model names.
 
 Model-name source is pluggable per host:
   - "ollama"   -> queries Ollama /api/ps              (slimridge)
-  - "lmstudio" -> queries LM Studio /api/v0/models    (eighty-eight)
+  - "lmstudio" -> queries LM Studio /api/v0/models    (eighty-eight, silverpancake)
   - "none"     -> falls back to nvidia-smi process VRAM only (chonky)
+
+LibreHardwareMonitor (optional, Windows): if LHM_URL is set, the script also reads
+LHM's JSON web server and publishes host stats (CPU temp/load/power, RAM, per-disk
+temp/used%) to a SEPARATE "Host <host>" device. With LHM_GPUS=1 it additionally
+publishes LHM-discovered GPU(s) into the "GPUs <host>" device — used for cards that
+have no nvidia-smi, e.g. the Intel Arc B580 on SilverPancake. (lhm_reader.py must
+sit next to this file.)
 
 Designed to be run once per interval by a systemd timer (not a long-running loop),
 so it's simple and crash-resilient. Config via environment variables (see the
@@ -26,6 +33,14 @@ import urllib.request
 
 import paho.mqtt.client as mqtt
 
+# lhm_reader.py lives next to this script; ensure it's importable no matter what
+# working directory the service (NSSM/systemd) starts us in.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+try:
+    import lhm_reader
+except Exception:  # optional; only needed when LHM_URL is set
+    lhm_reader = None
+
 # ---------------------------------------------------------------------------
 # Config (from environment)
 # ---------------------------------------------------------------------------
@@ -41,8 +56,24 @@ HOST = os.environ.get("GPU_HOST_NAME", socket.gethostname()).lower()
 MODEL_SOURCE = os.environ.get("MODEL_SOURCE", "none").lower()
 # Base URL for that serving API (only used if MODEL_SOURCE != none)
 MODEL_API_URL = os.environ.get("MODEL_API_URL", "http://127.0.0.1:11434")
+# Optional locality filter: comma-separated, case-insensitive substrings. When
+# set, only loaded models whose id contains one of these are reported. Needed
+# because LM Studio's `lms link` makes /api/v0/models return models loaded on
+# OTHER linked boxes too, with no host field to distinguish them. The `lms ps`
+# DEVICE column is the ground truth used to pick these (e.g. "gemma" on
+# SilverPancake, "qwen" on Eighty-Eight). Empty = report all loaded models.
+MODEL_FILTER = [s.strip().lower() for s in
+                os.environ.get("MODEL_FILTER", "").split(",") if s.strip()]
 
 DISCOVERY_PREFIX = os.environ.get("MQTT_DISCOVERY_PREFIX", "homeassistant")
+
+# --- LibreHardwareMonitor (optional; Windows host temps + non-nvidia GPUs) ---
+# Set to e.g. http://localhost:8085/data.json to also publish host stats.
+LHM_URL = os.environ.get("LHM_URL", "").strip()
+# If true (and LHM_URL set), also publish LHM GPU(s) into the GPU device. Use on
+# boxes whose GPU has no nvidia-smi (Arc B580). Leave OFF on nvidia boxes so their
+# cards aren't double-published. Filter which GPUs via LHM_GPU_INCLUDE (lhm_reader).
+LHM_GPUS = os.environ.get("LHM_GPUS", "0") not in ("0", "", "false", "False")
 
 # Set DEBUG=1 in the environment for verbose output.
 DEBUG = os.environ.get("DEBUG", "0") not in ("0", "", "false", "False")
@@ -127,12 +158,20 @@ def _http_json(url, timeout=10):
         return json.loads(r.read().decode())
 
 
+def _keep_local(names):
+    """Drop models not belonging to this box per MODEL_FILTER (no-op if unset)."""
+    if not MODEL_FILTER:
+        return names
+    return [n for n in names
+            if any(sub in n.lower() for sub in MODEL_FILTER)]
+
+
 def _models_ollama(gpus):
     """Ollama /api/ps lists currently-loaded models. Ollama doesn't expose which
     physical GPU index a model sits on, so on a single-GPU box we attribute all
     loaded models to GPU 0. (slimridge is single-V100, so this is correct.)"""
     data = _http_json(f"{MODEL_API_URL}/api/ps")
-    names = [m.get("name", "?") for m in data.get("models", [])]
+    names = _keep_local([m.get("name", "?") for m in data.get("models", [])])
     label = ", ".join(names) if names else "none loaded"
     # single-GPU attribution
     return {gpus[0]["index"]: label} if gpus else {}
@@ -142,11 +181,12 @@ def _models_lmstudio(gpus):
     """LM Studio lists loaded models via its REST API. Like Ollama it doesn't map
     model->physical GPU index, so we report the full loaded set against GPU 0 and
     note it's box-wide. (Good enough for 'is it loaded at all'.)
-    Path is configurable via MODEL_API_PATH (LM Studio default differs from Ollama)."""
+    Path is configurable via MODEL_API_PATH (LM Studio default differs from Ollama).
+    MODEL_FILTER strips out models that `lms link` surfaces from other boxes."""
     path = os.environ.get("MODEL_API_PATH", "/api/v0/models")
     data = _http_json(f"{MODEL_API_URL}{path}")
-    loaded = [m.get("id", "?") for m in data.get("data", [])
-              if m.get("state") == "loaded"]
+    loaded = _keep_local([m.get("id", "?") for m in data.get("data", [])
+                          if m.get("state") == "loaded"])
     label = ", ".join(loaded) if loaded else "none loaded"
     return {gpus[0]["index"]: label} if gpus else {}
 
@@ -292,15 +332,128 @@ def publish(client, gpus, models):
     return infos
 
 
+# ---------------------------------------------------------------------------
+# LibreHardwareMonitor: host stats + (optionally) non-nvidia GPUs
+# ---------------------------------------------------------------------------
+def read_lhm():
+    """Fetch LHM once. Returns (lhm_gpus, host) where lhm_gpus is a list of GPU
+    dicts shaped like read_gpus() output (empty unless LHM_GPUS), and host is a
+    {cpu, ram, disks} dict (or None). Never raises."""
+    if not LHM_URL:
+        return [], None
+    if lhm_reader is None:
+        print("LHM_URL set but lhm_reader.py not importable; skipping LHM.",
+              file=sys.stderr, flush=True)
+        return [], None
+    try:
+        m = lhm_reader.collect(LHM_URL)
+    except Exception as e:
+        print(f"LHM fetch failed ({LHM_URL}): {e}", file=sys.stderr, flush=True)
+        return [], None
+
+    gpus = []
+    if LHM_GPUS:
+        for g in m.get("gpus", []):
+            gpus.append({
+                "index": None,  # assigned (offset past nvidia) in run_once
+                "name": g.get("name", "GPU"),
+                "util": g.get("load_pct"),
+                "mem_used": g.get("vram_used_mb"),
+                "mem_total": g.get("vram_total_mb"),
+                "mem_pct": g.get("vram_pct"),
+                "temp": g.get("temp_c"),
+                "power": g.get("power_w"),
+            })
+    host = {"cpu": m.get("cpu", {}), "ram": m.get("ram", {}),
+            "disks": m.get("disks", [])}
+    return gpus, host
+
+
+def publish_host(client, host):
+    """Publish CPU/RAM/disk stats to a separate 'Host <host>' device.
+    Skips any metric whose value is None (sensor not present)."""
+    infos = []
+
+    def pub(topic, payload):
+        infos.append(client.publish(topic, payload, retain=True, qos=1))
+
+    device_id = f"host_{slug(HOST)}"
+    device_block = {
+        "identifiers": [device_id],
+        "name": f"Host {HOST}",
+        "model": "Host telemetry (LibreHardwareMonitor)",
+        "manufacturer": "gpu_telemetry.py",
+    }
+    base = f"host_telemetry/{slug(HOST)}"
+
+    def sensor(uid_suffix, name, unit, dclass, icon, state_topic, value):
+        if value is None:
+            return
+        uid = f"{device_id}_{uid_suffix}"
+        cfg = {
+            "name": f"{HOST} {name}",
+            "unique_id": uid,
+            "state_topic": state_topic,
+            "unit_of_measurement": unit,
+            "state_class": "measurement",
+            "icon": icon,
+            "device": device_block,
+        }
+        if dclass:
+            cfg["device_class"] = dclass
+        pub(f"{DISCOVERY_PREFIX}/sensor/{uid}/config", json.dumps(cfg))
+        pub(state_topic, value)
+
+    # One set of CPU sensors per socket. Socket 0 keeps the original "cpu_*"
+    # uids and topics (so single-socket boxes don't churn); extra sockets
+    # become cpu1_*, cpu2_*, ... Friendly names carry an index only when
+    # there's more than one socket.
+    cpus = host.get("cpus") or ([host["cpu"]] if host.get("cpu") else [])
+    multi = len(cpus) > 1
+    for i, cpu in enumerate(cpus):
+        pfx = "cpu" if i == 0 else f"cpu{i}"
+        label = f"CPU{i}" if multi else "CPU"
+        sensor(f"{pfx}_temp", f"{label} Temperature", "°C", "temperature",
+               "mdi:thermometer", f"{base}/{pfx}/temp", cpu.get("temp_c"))
+        sensor(f"{pfx}_load", f"{label} Load", "%", None, "mdi:gauge",
+               f"{base}/{pfx}/load", cpu.get("load_pct"))
+        sensor(f"{pfx}_power", f"{label} Power", "W", "power", "mdi:flash",
+               f"{base}/{pfx}/power", cpu.get("power_w"))
+
+    ram = host.get("ram") or {}
+    sensor("ram_used", "RAM Used", "GB", "data_size", "mdi:memory",
+           f"{base}/ram/used", ram.get("used_gb"))
+    sensor("ram_pct", "RAM %", "%", None, "mdi:memory",
+           f"{base}/ram/pct", ram.get("pct"))
+
+    for d in host.get("disks") or []:
+        dname = d.get("name", "disk")
+        dslug = slug(dname)
+        sensor(f"disk_{dslug}_temp", f"{dname} Temperature", "°C", "temperature",
+               "mdi:harddisk", f"{base}/disk/{dslug}/temp", d.get("temp_c"))
+        sensor(f"disk_{dslug}_used", f"{dname} Used", "%", None,
+               "mdi:harddisk", f"{base}/disk/{dslug}/used", d.get("used_pct"))
+
+    return infos
+
+
 def run_once():
     """One publish cycle. Returns True on full success, False otherwise."""
-    gpus = read_gpus()
-    if not gpus:
-        print("No GPUs found; nothing to publish.", file=sys.stderr, flush=True)
-        return False
-    dbg(f"found {len(gpus)} GPU(s):", [g["name"] for g in gpus])
+    gpus = read_gpus()                       # nvidia-smi GPUs (may be empty)
+    lhm_gpus, host = read_lhm()              # LHM GPUs (if LHM_GPUS) + host stats
+    # Offset LHM GPU indices so they don't collide with nvidia indices.
+    for i, g in enumerate(lhm_gpus):
+        g["index"] = str(len(gpus) + i)
+    gpus = gpus + lhm_gpus
 
-    models = read_models(gpus)
+    if not gpus and not host:
+        print("No GPUs and no LHM host data; nothing to publish.",
+              file=sys.stderr, flush=True)
+        return False
+    dbg(f"found {len(gpus)} GPU(s):", [g["name"] for g in gpus],
+        "| host stats:", bool(host))
+
+    models = read_models(gpus) if gpus else {}
     dbg("model labels:", models)
     dbg(f"connecting to MQTT {MQTT_HOST}:{MQTT_PORT} as user "
         f"'{MQTT_USER or '(anonymous)'}'")
@@ -352,7 +505,11 @@ def run_once():
         client.loop_stop()
         return False
 
-    infos = publish(client, gpus, models)
+    infos = []
+    if gpus:
+        infos += publish(client, gpus, models)
+    if host:
+        infos += publish_host(client, host)
     delivered = failed = 0
     for info in infos:
         try:
@@ -367,7 +524,9 @@ def run_once():
 
     client.loop_stop()
     client.disconnect()
-    print(f"Published {len(gpus)} GPU(s) for {HOST}: "
+    print(f"Published {len(gpus)} GPU(s)"
+          + (" + host stats" if host else "")
+          + f" for {HOST}: "
           f"{delivered}/{len(infos)} confirmed"
           + (f", {failed} FAILED" if failed else ""), flush=True)
     return failed == 0
