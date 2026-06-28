@@ -23,9 +23,9 @@ model-label source, then writes `.env`, builds the venv, and registers the
 service — **systemd timer** on Linux (single-shot every 30s), **NSSM loop** on
 Windows.
 
-On Windows the installer prints two final `nssm` commands that need your account
-password (run-as-user — LocalSystem can't reach the venv or LHM). Run them and
-the service is live.
+On Windows the installer registers the NSSM service and starts it as LocalSystem
+— no password step, the service is live when the installer finishes. (Run the
+installer from an elevated Git Bash so NSSM can register the service.)
 
 Re-run to reconfigure:
 
@@ -97,7 +97,9 @@ Each box sets what it runs. The collectors are independent flags:
   (no churn), extra sockets become `cpu1_*`, `cpu2_*`.
 - **HA discovery prefix is `homeassistant`** (the default) even though the HA
   instance is named cooperhome.
-- **Windows service must run as your user account**, not LocalSystem — the venv
-  and `localhost:8085` LHM endpoint aren't reachable otherwise.
+- **Windows service runs as LocalSystem** — the venv bundles its own deps, and
+  the LHM (`localhost:8085`) and LM Studio (`localhost:1234`) endpoints are
+  reachable from any account, so no run-as-user step is needed. Bonus: it
+  survives Windows password changes.
 - LHM `/vram` is Windows commit charge, not GPU VRAM; the reader keys RAM off
   `/ram` and GPU VRAM off `/gpu-*`.

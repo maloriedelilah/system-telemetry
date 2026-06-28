@@ -12,8 +12,8 @@
 # .env keeps your config and just (re)builds the venv + service.
 #
 # Linux  -> venv + systemd service & timer (single-shot every 30s).
-# Windows-> venv + NSSM service (long-running loop). Prints the run-as-user +
-#           start commands at the end (those need your password).
+# Windows-> venv + NSSM service (long-running loop), started as LocalSystem.
+#           The venv makes a run-as-user account unnecessary.
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -229,14 +229,12 @@ if [[ "$OS" == windows ]]; then
     nssm set "$SERVICE_NAME" AppStderr "$WERR"
     nssm set "$SERVICE_NAME" Start SERVICE_AUTO_START
 
-    say "Service registered. Two steps need YOUR password — finish them by hand:"
+    say "Starting service (runs as LocalSystem — the venv makes that sufficient)…"
+    nssm start "$SERVICE_NAME" 2>/dev/null || nssm restart "$SERVICE_NAME"
+
+    say "Done."
     cat <<EOF
-
-  nssm set $SERVICE_NAME ObjectName ".\\$USERNAME" "<YourPassword>"
-  nssm start $SERVICE_NAME
-
-(Run-as-user is the documented gotcha — LocalSystem can't reach the venv/LHM.)
-Logs: $INSTALL_DIR/logs/telemetry.{out,err}.log
+Logs:               $INSTALL_DIR/logs/telemetry.{out,err}.log
 Reconfigure later:  ./install.sh --reconfigure
 EOF
     exit 0
