@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# system-telemetry updater. Pulls the latest from GitHub, refreshes deps, and
-# restarts/triggers the service. Run from inside the install dir:
+# update.sh — pull the latest published release over this install and restart
+# the service. No git required: re-downloads the release tarball, preserving
+# your .env, venv, and logs. Run from inside the install dir:
 #
-#     cd /opt/telemetry   (or  cd "C:\telemetry"  in msys bash)
+#     cd /opt/telemetry        (or  cd /c/telemetry  in Git Bash)
 #     ./update.sh
-#
-# Authenticates via the deploy key configured for this clone's git remote.
 # ---------------------------------------------------------------------------
 set -euo pipefail
+
+OWNER="maloriedelilah"
+REPO="system-telemetry"
+ASSET="system-telemetry.tar.gz"
+URL="https://github.com/$OWNER/$REPO/releases/latest/download/$ASSET"
 
 SERVICE_NAME="system-telemetry"
 INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,14 +27,25 @@ case "$(uname -s)" in
     *) die "Unsupported OS: $(uname -s)" ;;
 esac
 
-say "Pulling latest…"
-git pull --ff-only
+SUDO=""
+[[ "$OS" == linux && "$(id -u)" -ne 0 ]] && SUDO="sudo"
 
-if [[ "$OS" == "linux" ]]; then
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+say "Downloading latest release…"
+curl -fSL "$URL" -o "$tmp/$ASSET" || die "Download failed: $URL"
+
+# Extract to a staging dir, then copy code over (tarball excludes .env/venv/logs).
+say "Applying update (.env, venv, logs preserved)…"
+mkdir -p "$tmp/x"
+tar xzf "$tmp/$ASSET" -C "$tmp/x"
+$SUDO cp -r "$tmp/x/." "$INSTALL_DIR/"
+
+if [[ "$OS" == linux ]]; then
     say "Refreshing deps…"
     "$INSTALL_DIR/venv/bin/pip" install --quiet -r "$INSTALL_DIR/requirements.txt"
-    say "Triggering a run (timer continues on its own cadence)…"
-    sudo systemctl start "${SERVICE_NAME}.service"
+    say "Triggering a run (timer keeps its own cadence)…"
+    $SUDO systemctl start "${SERVICE_NAME}.service"
     say "Done.  journalctl -u ${SERVICE_NAME}.service -n 20 --no-pager"
 else
     say "Refreshing deps…"

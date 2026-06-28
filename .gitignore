@@ -10,3 +10,4 @@ venv/
 # Editor noise
 .vscode/
 *.swp
+*.tar.gz
