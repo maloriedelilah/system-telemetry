@@ -1,0 +1,19 @@
+NSSM (Windows) service — what install.sh runs for you, kept here for reference.
+
+Service name: system-telemetry
+Runs the loop publisher (LOOP_INTERVAL must be set in .env, e.g. 30).
+
+  nssm install system-telemetry "<INSTALL_DIR>\venv\Scripts\python.exe" "-m" "telemetry"
+  nssm set system-telemetry AppDirectory "<INSTALL_DIR>"
+  nssm set system-telemetry AppStdout    "<INSTALL_DIR>\logs\telemetry.out.log"
+  nssm set system-telemetry AppStderr    "<INSTALL_DIR>\logs\telemetry.err.log"
+  nssm set system-telemetry Start        SERVICE_AUTO_START
+
+Run as your user account (needed so the venv + LHM localhost are reachable; this
+is the documented gotcha — LocalSystem has bitten us before). This step needs
+your password, so install.sh prints it rather than embedding it:
+
+  nssm set system-telemetry ObjectName ".\<YourUser>" "<YourPassword>"
+  nssm start system-telemetry
+
+Config lives in <INSTALL_DIR>\.env (config.py loads it; no AppEnvironmentExtra needed).

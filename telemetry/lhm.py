@@ -1,38 +1,35 @@
 #!/usr/bin/env python3
-"""
-lhm_reader.py — read host sensor stats from a LibreHardwareMonitor web server
-(http://<host>:8085/data.json) and return a clean, flat metrics dict.
+"""LibreHardwareMonitor reader.
 
-This is the cross-vendor companion to nvidia-smi: on Windows boxes (and anywhere
-LHM runs) it supplies CPU/RAM/disk temps, and full GPU stats for cards that have
-no nvidia-smi — notably the Intel Arc B580 on SilverPancake, which LHM exposes
-with VRAM used/free/total, temp, power, load and fan.
+Reads a LibreHardwareMonitor web server (http://<host>:8085/data.json) and returns
+a clean, flat metrics dict. The cross-vendor companion to nvidia-smi: supplies
+CPU/RAM/disk temps on Windows boxes, and full GPU stats for cards with no
+nvidia-smi (notably the Intel Arc B580 on SilverPancake).
 
 Design notes / gotchas baked in:
   * Selection is by HardwareId PREFIX + sensor Type + sensor Text, NOT by the
-    volatile numeric SensorId index, so it survives across machines and LHM
-    versions.
-  * LHM has a hardware node literally named "Virtual Memory" with HardwareId
-    "/vram" — that is Windows commit charge, NOT GPU VRAM. We key RAM off "/ram"
-    and GPU VRAM off the "/gpu-*" nodes, so "/vram" is ignored entirely.
-  * Integrated GPUs (e.g. the 9950X's "AMD Radeon(TM) Graphics", 2 GB) show up
-    alongside discrete cards. Set LHM_GPU_INCLUDE to a comma-separated list of
-    name substrings to whitelist (e.g. "Arc" on SilverPancake); empty = all.
+    volatile numeric SensorId index, so it survives across machines / LHM versions.
+  * LHM has a node named "Virtual Memory" with HardwareId "/vram" — that is Windows
+    commit charge, NOT GPU VRAM. RAM keys off "/ram"; GPU VRAM off "/gpu-*".
+  * Integrated GPUs (e.g. the 9950X's Radiance iGPU) appear alongside discrete
+    cards. Set LHM_GPU_INCLUDE to comma-separated name substrings to whitelist
+    (e.g. "Arc" on SilverPancake); empty = all.
+  * Dual-socket boards expose /intelcpu/0 AND /intelcpu/1 — every CPU socket is
+    collected into result["cpus"].
 
-Standalone use (for testing):  python lhm_reader.py [path-to-data.json]
+Standalone:  python -m telemetry.lhm [path-to-data.json]
 With no arg it fetches LHM_URL (default http://localhost:8085/data.json).
 """
 
 import json
-import os
 import re
 import sys
 import urllib.request
 
-LHM_URL = os.environ.get("LHM_URL", "http://localhost:8085/data.json")
-# Comma-separated GPU-name substrings to include; empty = include every GPU.
-GPU_INCLUDE = [s.strip().lower() for s in
-               os.environ.get("LHM_GPU_INCLUDE", "").split(",") if s.strip()]
+from . import config
+
+GPU_INCLUDE = [s.strip().lower() for s in config.LHM_GPU_INCLUDE.split(",")
+               if s.strip()]
 
 _VAL_RE = re.compile(r"^\s*(-?[\d]+(?:\.[\d]+)?)\s*(.*)$")
 
@@ -52,7 +49,6 @@ def flatten(node, hw_id="", hw_name="", out=None):
     {hw_id, hw_name, text, type, sensor_id, value, unit}."""
     if out is None:
         out = []
-    # A hardware node carries HardwareId; remember it as we descend.
     this_hw_id = node.get("HardwareId", hw_id)
     this_hw_name = node.get("Text", hw_name) if node.get("HardwareId") else hw_name
     sid = node.get("SensorId")
@@ -102,11 +98,9 @@ def _v(sensor):
 def collect_from_tree(tree):
     """Return structured host metrics from a parsed LHM data.json dict."""
     s = flatten(tree)
-    result = {"cpu": {}, "cpus": [], "ram": {}, "gpus": [], "disks": []}
+    result = {"cpus": [], "ram": {}, "gpus": [], "disks": []}
 
     # --- CPUs (AMD or Intel; one entry per socket) --------------------------
-    # Dual-socket boards (e.g. dual Xeon) expose /intelcpu/0 AND /intelcpu/1,
-    # so collect EVERY CPU node rather than just the first.
     for cpu_prefix in ("/amdcpu", "/intelcpu"):
         for hw_id, hw_name in _hw_nodes(s, cpu_prefix):
             temp = (_pick(s, hw_id, "Temperature", text_any=["Tctl/Tdie"])
@@ -122,9 +116,6 @@ def collect_from_tree(tree):
                 "load_pct": _v(_pick(s, hw_id, "Load", text_exact="CPU Total")),
                 "power_w": _v(power),
             })
-    # Back-compat: keep result["cpu"] = first socket for any older caller.
-    if result["cpus"]:
-        result["cpu"] = result["cpus"][0]
 
     # --- RAM (HardwareId "/ram" — NOT "/vram") ------------------------------
     if _hw_nodes(s, "/ram"):
@@ -175,10 +166,40 @@ def collect_from_tree(tree):
 
 def collect(url=None):
     """Fetch LHM data.json over HTTP and return structured metrics."""
-    url = url or LHM_URL
+    url = url or config.LHM_URL
     with urllib.request.urlopen(url, timeout=10) as r:
         tree = json.loads(r.read().decode())
     return collect_from_tree(tree)
+
+
+def read_host_and_gpus():
+    """Adapter for the orchestrator. Returns (lhm_gpus, host) where lhm_gpus is a
+    list of GPU dicts shaped like nvidia.read_gpus() output (empty unless
+    config.LHM_GPUS), and host is a {cpus, ram, disks} dict (or None). Never raises.
+    """
+    try:
+        m = collect(config.LHM_URL)
+    except Exception as e:
+        print(f"LHM fetch failed ({config.LHM_URL}): {e}",
+              file=sys.stderr, flush=True)
+        return [], None
+
+    gpus = []
+    if config.LHM_GPUS:
+        for g in m.get("gpus", []):
+            gpus.append({
+                "index": None,  # assigned (offset past nvidia) by the orchestrator
+                "name": g.get("name", "GPU"),
+                "util": g.get("load_pct"),
+                "mem_used": g.get("vram_used_mb"),
+                "mem_total": g.get("vram_total_mb"),
+                "mem_pct": g.get("vram_pct"),
+                "temp": g.get("temp_c"),
+                "power": g.get("power_w"),
+            })
+    host = {"cpus": m.get("cpus", []), "ram": m.get("ram", {}),
+            "disks": m.get("disks", [])}
+    return gpus, host
 
 
 if __name__ == "__main__":
@@ -186,5 +207,5 @@ if __name__ == "__main__":
         with open(sys.argv[1], encoding="utf-8") as f:
             data = collect_from_tree(json.load(f))
     else:
-        data = collect(LHM_URL)
+        data = collect()
     print(json.dumps(data, indent=2, ensure_ascii=False))

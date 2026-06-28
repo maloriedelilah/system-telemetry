@@ -1,0 +1,12 @@
+# Local machine config — holds MQTT creds, never commit
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+
+# Editor noise
+.vscode/
+*.swp

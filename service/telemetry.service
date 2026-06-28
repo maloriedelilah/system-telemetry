@@ -1,0 +1,17 @@
+# Installed to /etc/systemd/system/system-telemetry.service by install.sh
+# (__INSTALL_DIR__ is replaced with the real path at install time).
+# Single-shot: the .timer drives cadence. config.py reads __INSTALL_DIR__/.env.
+[Unit]
+Description=system-telemetry (GPU + host telemetry to Home Assistant)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=__INSTALL_DIR__
+ExecStart=__INSTALL_DIR__/venv/bin/python -m telemetry
+# Run as the invoking user (install.sh fills these in).
+User=__RUN_USER__
+
+[Install]
+WantedBy=multi-user.target
