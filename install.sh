@@ -185,6 +185,10 @@ if [[ "$OS" == linux ]]; then
     "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade pip
     "$INSTALL_DIR/venv/bin/pip" install --quiet -r "$INSTALL_DIR/requirements.txt"
     chown -R "$RUN_USER" "$INSTALL_DIR/venv" 2>/dev/null || true
+    # .env is written root-owned (umask 077 under the sudo re-exec), but the
+    # service runs as $RUN_USER. Hand it over so config.py can read it; mode
+    # stays 0600 so the MQTT password remains owner-only.
+    chown "$RUN_USER" "$INSTALL_DIR/.env" 2>/dev/null || true
 
     say "Installing systemd unit + timer (run user: $RUN_USER)…"
     sed -e "s#__INSTALL_DIR__#$INSTALL_DIR#g" -e "s#__RUN_USER__#$RUN_USER#g" \
