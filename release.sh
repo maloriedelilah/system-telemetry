@@ -60,12 +60,11 @@ git push origin "$TAG"
 
 say "Building $ASSET…"
 rm -f "$ASSET"
-tar czf "$ASSET" \
-    --exclude='./.git' --exclude='./.env' --exclude='./venv' \
-    --exclude='./logs' --exclude='./__pycache__' \
-    --exclude='*/__pycache__' --exclude='*.pyc' \
-    --exclude="./$ASSET" \
-    -C "$ROOT" .
+# Build from the committed tree, not the working dir. Avoids tar's
+# "file changed as we read it" abort (writing $ASSET into the dir being read
+# mutates '.'), drops untracked cruft (.env/venv/logs/__pycache__) for free, and
+# honors .gitattributes EOL so Windows autocrlf can't ship CRLF .sh files to Linux.
+git archive --format=tar.gz -o "$ASSET" HEAD
 
 say "Publishing GitHub release $TAG…"
 gh release create "$TAG" "$ASSET" \
