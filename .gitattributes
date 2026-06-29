@@ -1,0 +1,7 @@
+# Force LF on shell scripts and Python so Windows autocrlf can never ship CRLF
+# files to the Linux/HAOS boxes. git archive (release.sh) honors these on export.
+*.sh   text eol=lf
+*.py   text eol=lf
+*.txt  text eol=lf
+*.md   text eol=lf
+.env.example text eol=lf
