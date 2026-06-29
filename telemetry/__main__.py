@@ -19,6 +19,7 @@ import paho.mqtt.client as mqtt_client
 from . import config
 from . import nvidia
 from . import lhm
+from . import linux_host
 from . import mqtt as publisher
 
 dbg = config.dbg
@@ -36,9 +37,14 @@ def run_once():
         g["index"] = str(len(gpus) + i)
     gpus = gpus + lhm_gpus
 
+    # Linux host stats (psutil/lm-sensors) — LHM is Windows-only, so this is how
+    # Linux boxes populate the "Host <host>" device.
+    if host is None and config.TELEMETRY_HOST and config.IS_LINUX:
+        host = linux_host.read_host()
+
     if not gpus and not host:
         print("No GPUs and no host data; nothing to publish "
-              "(check TELEMETRY_NVIDIA / TELEMETRY_LHM).",
+              "(check TELEMETRY_NVIDIA / TELEMETRY_LHM / TELEMETRY_HOST).",
               file=sys.stderr, flush=True)
         return False
     dbg(f"found {len(gpus)} GPU(s):", [g["name"] for g in gpus],

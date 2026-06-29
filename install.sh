@@ -92,7 +92,7 @@ write_env() {
     HOSTNAME_FRIENDLY="$(ask 'Friendly host name (blank = OS hostname)' '')"
 
     # Roles
-    local NVIDIA=0 LHM=0 LHM_GPUS=0 LHM_URL="http://localhost:8085/data.json" LHM_INC=""
+    local NVIDIA=0 LHM=0 LHM_GPUS=0 LHM_URL="http://localhost:8085/data.json" LHM_INC="" HOST_STATS=0
     if ask_yn 'Collect NVIDIA GPU metrics (nvidia-smi)?' y; then NVIDIA=1; fi
     if [[ "$OS" == windows ]]; then
         if ask_yn 'Collect host stats via LibreHardwareMonitor?' y; then
@@ -104,7 +104,10 @@ write_env() {
             fi
         fi
     else
-        warn "LibreHardwareMonitor is Windows-only — host stats disabled on Linux."
+        # LibreHardwareMonitor is Windows-only; Linux host stats come from psutil.
+        if ask_yn 'Collect host CPU/RAM/disk stats (psutil + lm-sensors)?' y; then
+            HOST_STATS=1
+        fi
     fi
 
     # Model source
@@ -146,6 +149,7 @@ TELEMETRY_LHM=$LHM
 LHM_GPUS=$LHM_GPUS
 LHM_URL=$LHM_URL
 LHM_GPU_INCLUDE=$LHM_INC
+TELEMETRY_HOST=$HOST_STATS
 
 MODEL_SOURCE=$MODEL_SOURCE
 MODEL_API_URL=$MODEL_URL

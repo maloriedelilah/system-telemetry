@@ -67,8 +67,12 @@ HOST = os.environ.get("TELEMETRY_HOST_NAME",
 # Roles — explicit per machine (replaces inferring LHM from LHM_URL presence)
 # ---------------------------------------------------------------------------
 TELEMETRY_NVIDIA = _flag("TELEMETRY_NVIDIA", "1")   # run nvidia-smi collector
-TELEMETRY_LHM = _flag("TELEMETRY_LHM", "0")         # run LibreHardwareMonitor reader
+TELEMETRY_LHM = _flag("TELEMETRY_LHM", "0")         # run LibreHardwareMonitor reader (Windows)
 LHM_GPUS = _flag("LHM_GPUS", "0")                   # include GPUs from LHM (Arc boxes)
+TELEMETRY_HOST = _flag("TELEMETRY_HOST", "0")       # run psutil host collector (Linux)
+
+# Platform flag: the Linux host collector (psutil/lm-sensors) only runs here.
+IS_LINUX = sys.platform.startswith("linux")
 
 # ---------------------------------------------------------------------------
 # Model-name source: ollama | lmstudio | none
