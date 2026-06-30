@@ -8,4 +8,4 @@ Modules:
   __main__ - orchestrator (one cycle or loop), service entrypoint
 """
 
-__version__ = "1.2.3"
+__version__ = "1.2.4"
