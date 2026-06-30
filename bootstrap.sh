@@ -36,6 +36,12 @@ else
     DIR="${TELEMETRY_DIR:-/c/telemetry}"   # C:\telemetry under msys
 fi
 
+# Windows needs an elevated shell: creating C:\telemetry at the drive root and
+# the NSSM service ops both require admin. Fail fast rather than half-install.
+if [[ "$OS" == windows ]] && ! reg query 'HKU\S-1-5-19' >/dev/null 2>&1; then
+    die "Administrator privileges required. Re-run from an ELEVATED Git Bash (right-click Git Bash, then 'Run as administrator')."
+fi
+
 command -v curl >/dev/null || die "curl not found."
 command -v tar  >/dev/null || die "tar not found."
 

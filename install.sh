@@ -43,6 +43,17 @@ if [[ "$OS" == linux && "$INSTALL_DIR" == /opt/* && "$(id -u)" -ne 0 ]]; then
     exec sudo -E bash "$INSTALL_DIR/install.sh" "$@" </dev/tty
 fi
 
+# ---------------------------------------------------------------------------
+# Windows: NSSM self-elevates (UAC) for `nssm install`, but `nssm start`
+# silently fails from a non-elevated Git Bash, leaving the service
+# registered-but-stopped. Hard-require an elevated shell and fail fast. The
+# LocalService hive (S-1-5-19) is readable only when elevated — a check that
+# does not depend on the Server service the way `net session` does.
+# ---------------------------------------------------------------------------
+if [[ "$OS" == windows ]] && ! reg query 'HKU\S-1-5-19' >/dev/null 2>&1; then
+    die "Administrator privileges required. Re-run from an ELEVATED Git Bash (right-click Git Bash, then 'Run as administrator'). NSSM needs admin to register AND start the service."
+fi
+
 say "Detected OS: $OS"
 say "Install dir: $INSTALL_DIR"
 
