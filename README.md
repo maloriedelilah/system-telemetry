@@ -82,7 +82,7 @@ Each box sets what it runs. The collectors are independent flags:
 
 | machine       | NVIDIA | LHM | LHM_GPUS | MODEL_SOURCE | notes |
 |---------------|:------:|:---:|:--------:|--------------|-------|
-| slimridge     |   1    |  0  |    0     | ollama       | Linux, single V100 |
+| slimridge     |   1    |  0  |    0     | docker       | Linux, single V100; llama.cpp embed + rerank in Docker (user in `docker` group) |
 | Chonky        |   1    |  0* |    0     | none         | RTX 3090; LHM optional for host temps |
 | Eighty-Eight  |   1    |  1  |    0     | lmstudio     | dual Xeon + 3×V100 + K2200; LHM = host temps only |
 | SilverPancake |   0    |  1  |    1     | lmstudio     | Arc B580 has no nvidia-smi; LHM supplies the GPU |

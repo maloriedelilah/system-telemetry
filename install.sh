@@ -124,9 +124,9 @@ write_env() {
     # Model source
     local MODEL_SOURCE MODEL_URL MODEL_PATH="/api/v0/models" MODEL_FILTER=""
     while :; do
-        MODEL_SOURCE="$(ask 'Loaded-model labels source — ollama / lmstudio / none' 'none')"
-        case "$MODEL_SOURCE" in ollama|lmstudio|none) break ;; esac
-        printf '  enter one of: ollama, lmstudio, none\n' >&4
+        MODEL_SOURCE="$(ask 'Loaded-model labels source — ollama / lmstudio / docker / none' 'none')"
+        case "$MODEL_SOURCE" in ollama|lmstudio|docker|none) break ;; esac
+        printf '  enter one of: ollama, lmstudio, docker, none\n' >&4
     done
     case "$MODEL_SOURCE" in
         ollama)
@@ -136,6 +136,10 @@ write_env() {
             MODEL_URL="$(ask 'LM Studio API URL' 'http://127.0.0.1:1234')"
             MODEL_PATH="/api/v0/models"
             MODEL_FILTER="$(ask 'Model-name filter, keeps only local models (blank = all)' '')" ;;
+        docker)
+            # Reads `docker ps`/`docker inspect`: the service user must be in the docker group.
+            MODEL_URL="http://127.0.0.1:11434"
+            MODEL_FILTER="$(ask 'Model-name filter, keeps only matching models (blank = all)' '')" ;;
         none) MODEL_URL="http://127.0.0.1:11434" ;;
     esac
 
