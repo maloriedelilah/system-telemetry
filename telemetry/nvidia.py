@@ -1,7 +1,7 @@
 """NVIDIA GPU metrics (nvidia-smi) and loaded-model-name adapters.
 
 read_gpus()   -> list of per-GPU metric dicts (util, mem, temp, power)
-read_models() -> {gpu_index: "model1, model2"} from ollama | lmstudio | nvidia-smi
+read_models() -> {gpu_index: "model1, model2"} from ollama | lmstudio | docker | nvidia-smi
 """
 
 import json
@@ -82,6 +82,8 @@ def read_models(gpus):
             return _models_ollama(gpus)
         if MODEL_SOURCE == "lmstudio":
             return _models_lmstudio(gpus)
+        if MODEL_SOURCE == "docker":
+            return _models_docker(gpus)
         return _models_from_nvidia_smi(gpus)
     except Exception as e:  # never let model lookup break the hardware metrics
         print(f"model lookup failed: {e}", file=sys.stderr)
@@ -119,6 +121,60 @@ def _models_lmstudio(gpus):
                           if m.get("state") == "loaded"])
     label = ", ".join(loaded) if loaded else "none loaded"
     return {gpus[0]["index"]: label} if gpus else {}
+
+
+def _model_arg(args):
+    """The model file named by -m / --model (or --model=...) in a container's
+    command line, as a short label: basename without .gguf. None if absent."""
+    for i, a in enumerate(args):
+        if a in ("-m", "--model") and i + 1 < len(args):
+            path = args[i + 1]
+            break
+        if a.startswith("--model="):
+            path = a.split("=", 1)[1]
+            break
+    else:
+        return None
+    name = os.path.basename(path)
+    return name[:-5] if name.lower().endswith(".gguf") else name
+
+
+def _models_docker(gpus):
+    """Model servers running in Docker containers (llama.cpp llama-server on
+    slimridge), whose APIs have no host port. Reads the running containers with
+    the docker CLI — the service user must be in the `docker` group — and labels
+    each one that names a model file (-m / --model) as "<model> (<service>)",
+    where <service> is the compose service name (or the container name).
+
+    GPU attribution: a container that requests specific devices
+    (HostConfig.DeviceRequests[].DeviceIDs, i.e. compose `device_ids`) is shown on
+    those GPU indexes; one that asks for all GPUs, or doesn't say, is shown on
+    GPU 0, like the ollama/lmstudio adapters. MODEL_FILTER applies to the labels."""
+    ids = subprocess.check_output(["docker", "ps", "-q"], text=True, timeout=15).split()
+    if not ids:
+        return {g["index"]: "none loaded" for g in gpus}
+    raw = subprocess.check_output(["docker", "inspect", *ids], text=True, timeout=15)
+    per_gpu = {}
+    default_idx = gpus[0]["index"] if gpus else "0"
+    known = {g["index"] for g in gpus}
+    for c in json.loads(raw):
+        cfg = c.get("Config") or {}
+        args = list(c.get("Args") or []) or list(cfg.get("Cmd") or [])
+        model = _model_arg(args)
+        if not model:
+            continue
+        labels = cfg.get("Labels") or {}
+        svc = labels.get("com.docker.compose.service") or c.get("Name", "").lstrip("/")
+        label = f"{model} ({svc})" if svc else model
+        if not _keep_local([label]):
+            continue
+        idxs = []
+        for req in (c.get("HostConfig") or {}).get("DeviceRequests") or []:
+            idxs += [str(d) for d in (req.get("DeviceIDs") or []) if str(d) in known]
+        for idx in idxs or [default_idx]:
+            per_gpu.setdefault(idx, []).append(label)
+    return {g["index"]: ", ".join(sorted(per_gpu.get(g["index"], []))) or "none loaded"
+            for g in gpus}
 
 
 def _models_from_nvidia_smi(gpus):

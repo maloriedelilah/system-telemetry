@@ -75,7 +75,7 @@ TELEMETRY_HOST = _flag("TELEMETRY_HOST", "0")       # run psutil host collector 
 IS_LINUX = sys.platform.startswith("linux")
 
 # ---------------------------------------------------------------------------
-# Model-name source: ollama | lmstudio | none
+# Model-name source: ollama | lmstudio | docker | none
 # ---------------------------------------------------------------------------
 MODEL_SOURCE = os.environ.get("MODEL_SOURCE", "none").lower()
 MODEL_API_URL = os.environ.get("MODEL_API_URL", "http://127.0.0.1:11434")
