@@ -113,3 +113,27 @@ def slug(s):
 def dbg(*a):
     if DEBUG:
         print("[debug]", *a, file=sys.stderr, flush=True)
+
+
+def _one_line(value):
+    """Collapse a value to a single line so each report field stays on its own row."""
+    return " ".join(str(value).split())
+
+
+def report(title, did, expected, got, nxt):
+    """Print an error (or warning) to stderr in the house format:
+
+        !!! <title>
+            Did:      <what it tried>
+            Expected: <what should have happened>
+            Got:      <what happened instead>
+            Next:     <what to check>
+
+    Callers must never pass a secret into any field.
+    """
+    print(f"!!! {_one_line(title)}\n"
+          f"    Did:      {_one_line(did)}\n"
+          f"    Expected: {_one_line(expected)}\n"
+          f"    Got:      {_one_line(got)}\n"
+          f"    Next:     {_one_line(nxt)}",
+          file=sys.stderr, flush=True)
