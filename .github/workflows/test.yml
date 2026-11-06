@@ -1,0 +1,61 @@
+name: test
+
+# Runs on every PR and on pushes to main. The roll-up job `test` is the one to mark
+# as required in the branch ruleset: it fails if any job before it failed or was skipped.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - name: Install runtime dependencies
+        run: pip install -r requirements.txt
+      - name: Every module compiles and imports
+        run: |
+          python -m compileall -q telemetry tests
+          for m in telemetry/*.py; do
+            name="$(basename "$m" .py)"
+            [ "$name" = "__main__" ] && continue   # importing it would start a telemetry run
+            python -c "import telemetry.${name}"
+          done
+      - name: Tests (each file is a standalone script; exit status is the verdict)
+        run: |
+          set -e
+          for t in tests/test_*.py; do
+            echo "== $t"
+            python "$t"
+          done
+
+  shell:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - name: Syntax
+        run: for f in *.sh; do bash -n "$f"; done
+      - name: shellcheck (the runner's version is the one that counts)
+        run: |
+          shellcheck --version | sed -n 2p
+          shellcheck -S warning *.sh
+
+  test:
+    runs-on: ubuntu-24.04
+    needs: [python, shell]
+    if: always()
+    steps:
+      - run: |
+          echo "python: ${{ needs.python.result }}, shell: ${{ needs.shell.result }}"
+          test "${{ needs.python.result }}" = success && test "${{ needs.shell.result }}" = success
