@@ -4,6 +4,11 @@
 Reads role flags from config and runs the enabled collectors:
   TELEMETRY_NVIDIA -> nvidia.read_gpus + nvidia.read_models
   TELEMETRY_LHM    -> lhm.read_host_and_gpus (host temps; +GPUs if LHM_GPUS)
+  TELEMETRY_HOST   -> linux_host.read_host (Linux psutil/hwmon)
+
+Data is collected once, then sent to each enabled output independently:
+  PANE_URL set  -> pane.push   (Influx line protocol to Pane)
+  MQTT_HOST set -> HA discovery + states over MQTT
 
 LOOP_INTERVAL set (seconds) -> run forever (NSSM/Windows service).
 Unset -> single shot (systemd timer on Linux).
@@ -21,12 +26,13 @@ from . import nvidia
 from . import lhm
 from . import linux_host
 from . import mqtt as publisher
+from . import pane
 
 dbg = config.dbg
 
 
 def run_once():
-    """One publish cycle. Returns True on full success, False otherwise."""
+    """One publish cycle. Returns True only if every enabled output succeeded."""
     gpus = nvidia.read_gpus() if config.TELEMETRY_NVIDIA else []
 
     lhm_gpus, host = ([], None)
@@ -52,6 +58,42 @@ def run_once():
 
     models = nvidia.read_models(gpus) if gpus else {}
     dbg("model labels:", models)
+
+    if not config.PANE_URL and not config.MQTT_HOST:
+        config.report(
+            "No output is configured",
+            "looked for PANE_URL and MQTT_HOST",
+            "at least one of them set",
+            "both are empty",
+            "set PANE_URL (push to Pane) and/or MQTT_HOST (Home Assistant) in .env")
+        return False
+
+    # Outputs are independent: each runs in its own try/except so one failing
+    # (broker refused, Pane down, timeout) never stops the other. Pane goes first;
+    # it is quick and doesn't depend on the broker.
+    results = []
+    if config.PANE_URL:
+        try:
+            results.append(pane.push(pane.to_lines(gpus, models, host)))
+        except Exception as e:
+            config.report("Pane output crashed", "build and push the Pane lines",
+                          "a push attempt", f"{type(e).__name__}: {e}",
+                          "this is a bug in telemetry/pane.py; the MQTT output is unaffected")
+            results.append(False)
+    if config.MQTT_HOST:
+        try:
+            results.append(publish_mqtt(gpus, models, host))
+        except Exception as e:
+            config.report("MQTT output crashed",
+                          f"publish to {config.MQTT_HOST}:{config.MQTT_PORT}",
+                          "published states", f"{type(e).__name__}: {e}",
+                          "check the broker is reachable; the Pane output is unaffected")
+            results.append(False)
+    return all(results)
+
+
+def publish_mqtt(gpus, models, host):
+    """The MQTT output: HA discovery + states. True if everything was confirmed."""
     dbg(f"connecting to MQTT {config.MQTT_HOST}:{config.MQTT_PORT} as user "
         f"'{config.MQTT_USER or '(anonymous)'}'")
 

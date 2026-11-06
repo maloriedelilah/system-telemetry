@@ -49,11 +49,41 @@ def _flag(name, default="0"):
 # ---------------------------------------------------------------------------
 # MQTT
 # ---------------------------------------------------------------------------
-MQTT_HOST = os.environ.get("MQTT_HOST", "homehub.local")
+# MQTT_HOST set but empty = MQTT off (a box that only reports to Pane). Unset keeps
+# the old default.
+MQTT_HOST = os.environ.get("MQTT_HOST", "homehub.local").strip()
 MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
 MQTT_USER = os.environ.get("MQTT_USER", "")
 MQTT_PASS = os.environ.get("MQTT_PASS", "")
 DISCOVERY_PREFIX = os.environ.get("MQTT_DISCOVERY_PREFIX", "homeassistant")
+
+# ---------------------------------------------------------------------------
+# Pane (VictoriaMetrics backplane on the tailnet) - second output, Influx line
+# protocol over HTTP. PANE_URL empty = off. The bearer token is NEVER an env var:
+# it is read from PANE_TOKEN_FILE each cycle (see pane.py).
+# ---------------------------------------------------------------------------
+PANE_URL = os.environ.get("PANE_URL", "").strip().rstrip("/")
+PANE_TOKEN_FILE = (os.environ.get("PANE_TOKEN_FILE", "").strip()
+                   or (r"C:\ProgramData\telemetry\secrets\pane_token" if os.name == "nt"
+                       else "/opt/telemetry/secrets/pane_token"))
+
+
+def _positive_float(name, default):
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+        if value > 0 and value != float("inf"):
+            return value
+    except ValueError:
+        pass
+    print(f"[config] {name}={raw!r} is not a positive number; using {default:g}",
+          file=sys.stderr, flush=True)
+    return default
+
+
+PANE_TIMEOUT = _positive_float("PANE_TIMEOUT", 10.0)   # seconds, per socket operation
 
 # ---------------------------------------------------------------------------
 # Identity
