@@ -1,7 +1,7 @@
 """NVIDIA GPU metrics (nvidia-smi) and loaded-model-name adapters.
 
 read_gpus()   -> list of per-GPU metric dicts (util, mem, temp, power)
-read_models() -> {gpu_index: "model1, model2"} from ollama | lmstudio | docker | nvidia-smi
+read_models() -> {gpu_index: "model1, model2"} from ollama | lmstudio | docker | llamaserver | nvidia-smi
 """
 
 import json
@@ -84,6 +84,8 @@ def read_models(gpus):
             return _models_lmstudio(gpus)
         if MODEL_SOURCE == "docker":
             return _models_docker(gpus)
+        if MODEL_SOURCE == "llamaserver":
+            return _models_llamaserver(gpus)
         return _models_from_nvidia_smi(gpus)
     except Exception as e:  # never let model lookup break the hardware metrics
         print(f"model lookup failed: {e}", file=sys.stderr)
@@ -120,6 +122,43 @@ def _models_lmstudio(gpus):
     loaded = _keep_local([m.get("id", "?") for m in data.get("data", [])
                           if m.get("state") == "loaded"])
     label = ", ".join(loaded) if loaded else "none loaded"
+    return {gpus[0]["index"]: label} if gpus else {}
+
+
+def _models_llamaserver(gpus):
+    """llama.cpp `llama-server` instances (Eighty-Eight runs two under NSSM, on
+    :1234 and :1235). MODEL_API_URL is a comma-separated list of base URLs; each
+    one's GET <url>/v1/models lists what it serves in data[].id. Like the
+    ollama/lmstudio adapters there is no model->GPU mapping, so every label is
+    reported against GPU 0. MODEL_FILTER applies to the ids.
+
+    One instance being down must not hide the others' labels: it is reported in
+    the house format and skipped. If every instance fails, returns {} (the
+    callers show "unknown")."""
+    urls = [u.strip().rstrip("/") for u in MODEL_API_URL.split(",") if u.strip()]
+    names, answered = [], 0
+    for url in urls:
+        endpoint = f"{url}/v1/models"
+        try:
+            data = _http_json(endpoint)
+            ids = [str(m.get("id", "?")) for m in data.get("data", [])]
+        except Exception as e:
+            config.report(
+                "llama-server model lookup failed",
+                f"GET {endpoint}",
+                "200 with a JSON body {\"data\": [{\"id\": ...}]}",
+                f"{type(e).__name__}: {e}",
+                "check the llama-server is running and listening on that port "
+                "(NSSM service status), and that MODEL_API_URL lists each base "
+                "URL, e.g. http://127.0.0.1:1234,http://127.0.0.1:1235. "
+                "The other instances' labels are still reported.")
+            continue
+        answered += 1
+        names += ids
+    if not answered:
+        return {}
+    names = _keep_local(names)
+    label = ", ".join(names) if names else "none loaded"
     return {gpus[0]["index"]: label} if gpus else {}
 
 

@@ -75,9 +75,10 @@ TELEMETRY_HOST = _flag("TELEMETRY_HOST", "0")       # run psutil host collector 
 IS_LINUX = sys.platform.startswith("linux")
 
 # ---------------------------------------------------------------------------
-# Model-name source: ollama | lmstudio | docker | none
+# Model-name source: ollama | lmstudio | docker | llamaserver | none
 # ---------------------------------------------------------------------------
 MODEL_SOURCE = os.environ.get("MODEL_SOURCE", "none").lower()
+# llamaserver takes a comma-separated list of base URLs here (one per instance).
 MODEL_API_URL = os.environ.get("MODEL_API_URL", "http://127.0.0.1:11434")
 MODEL_API_PATH = os.environ.get("MODEL_API_PATH", "/api/v0/models")
 # Locality filter: comma-separated, case-insensitive substrings. When set, only

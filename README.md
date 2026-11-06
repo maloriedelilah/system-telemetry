@@ -84,10 +84,27 @@ Each box sets what it runs. The collectors are independent flags:
 |---------------|:------:|:---:|:--------:|--------------|-------|
 | slimridge     |   1    |  0  |    0     | docker       | Linux, single V100; llama.cpp embed + rerank in Docker (user in `docker` group) |
 | Chonky        |   1    |  0* |    0     | none         | RTX 3090; LHM optional for host temps |
-| Eighty-Eight  |   1    |  1  |    0     | lmstudio     | dual Xeon + 3×V100 + K2200; LHM = host temps only |
+| Eighty-Eight  |   1    |  1  |    0     | lmstudio     | dual Xeon + 3×V100 + K2200; LHM = host temps only (`llamaserver` fits its two llama-server instances on :1234/:1235) |
 | SilverPancake |   0    |  1  |    1     | lmstudio     | Arc B580 has no nvidia-smi; LHM supplies the GPU |
 
 `*` flip to 1 whenever you want Chonky's CPU/RAM/disk temps too.
+
+## Model-label sources
+
+`MODEL_SOURCE` picks where the "loaded models" label comes from:
+
+| source        | reads | `MODEL_API_URL` |
+|---------------|-------|-----------------|
+| `ollama`      | `GET /api/ps` | the Ollama base URL |
+| `lmstudio`    | `GET <MODEL_API_PATH>` (LM Studio's REST API) | the LM Studio base URL |
+| `docker`      | `docker ps` / `docker inspect` (service user in the `docker` group) | unused |
+| `llamaserver` | `GET <url>/v1/models` on each llama.cpp `llama-server` instance, using each `data[].id` | comma-separated base URLs, e.g. `http://127.0.0.1:1234,http://127.0.0.1:1235` |
+| `none`        | VRAM-using compute processes from `nvidia-smi` | unused |
+
+The API-based sources can't tell which card a model sits on, so they report the
+full set against GPU 0. `MODEL_FILTER` (comma-separated substrings) keeps only
+matching labels. With `llamaserver`, an instance that doesn't answer is reported
+on stderr and skipped; the other instances' labels still go out.
 
 ## Notes
 
