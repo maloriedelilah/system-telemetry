@@ -17,3 +17,7 @@ your password, so install.sh prints it rather than embedding it:
   nssm start system-telemetry
 
 Config lives in <INSTALL_DIR>\.env (config.py loads it; no AppEnvironmentExtra needed).
+
+Pane (PANE_URL in .env): the bearer token is read each cycle from
+C:\ProgramData\telemetry\secrets\pane_token (or PANE_TOKEN_FILE). The account the
+service runs as must be able to read it; lock the folder down, see README "Pane".

@@ -1,5 +1,8 @@
 # Local machine config — holds MQTT creds, never commit
 .env
+# Pane bearer token (never commit)
+secrets/
+pane_token
 
 # Python
 __pycache__/
