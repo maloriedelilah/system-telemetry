@@ -277,8 +277,9 @@ def test_token_whitespace_stripped_and_reread_each_cycle():
         setup(p.url, path)
         with Capture():
             assert pane.push(["telemetry up=1,gpus=0"])
-            with open(path, "w") as f:
-                f.write("rotated-token-XYZ\n")        # rotation: no restart needed
+            # Rotation, as it's done on a box: a new 0400 file moved over the old one
+            # (the old one is 0400, so writing it in place fails for a non-root user).
+            os.replace(token_file("rotated-token-XYZ\n"), path)   # no restart needed
             assert pane.push(["telemetry up=1,gpus=0"])
         assert [r["auth"] for r in p.requests] == [f"Bearer {TOKEN}", "Bearer rotated-token-XYZ"]
     finally:
