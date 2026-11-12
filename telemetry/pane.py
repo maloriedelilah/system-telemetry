@@ -253,23 +253,30 @@ def push(lines):
     # empty netloc, and must still never be echoed (Errata, OPS-19 L1).
     if "@" in base:
         prefix = base.split("://", 1)[0] + "://" if "://" in base.split("@", 1)[0] else ""
-        shown = f"{prefix}<removed>@{base.rsplit('@', 1)[1]}"
+        shown = f"{prefix}<removed>@{re.split(r'[/?#]', base.rsplit('@', 1)[1], maxsplit=1)[0]}"
         config.report("PANE_URL has a user or token in it", f"read PANE_URL ({shown})",
                       "PANE_URL like http://100.92.61.42:8427, with the token only in PANE_TOKEN_FILE",
                       "a user:password@ part (not shown)",
                       "remove the user:token@ part from PANE_URL in .env; the token belongs in "
                       "PANE_TOKEN_FILE. No request was sent.")
         return False
-    endpoint = f"{base}/influx/write"
-    did = f"POST {endpoint} ({len(lines)} lines)"
-
+    # Neither of these echoes the value: a token pasted in on its own, or in a path or query, would be
+    # printed into the journal (Errata, OPS-19 L11 and part 1 L2).
     if not base.lower().startswith(("http://", "https://")):
-        config.report("PANE_URL is not an http(s) URL", did,
+        config.report("PANE_URL is not an http(s) URL", "read PANE_URL",
                       "PANE_URL like http://100.92.61.42:8427",
-                      f"PANE_URL={base!r}",
+                      "it doesn't start with http:// or https:// (not shown, in case it holds a token)",
                       "fix PANE_URL in .env (or leave it empty to turn Pane off). "
                       "No request was sent.")
         return False
+    if not re.fullmatch(r"https?://[^/?#\s]+", base, re.IGNORECASE):
+        config.report("PANE_URL has more than a scheme, host and port", "read PANE_URL",
+                      "PANE_URL like http://100.92.61.42:8427, nothing after the port",
+                      "a path, query or fragment after the host (not shown, in case it holds a token)",
+                      "set PANE_URL in .env to just http(s)://host:port. No request was sent.")
+        return False
+    endpoint = f"{base}/influx/write"
+    did = f"POST {endpoint} ({len(lines)} lines)"
 
     token = _read_token(did)
     if token is None:

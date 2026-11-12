@@ -27,8 +27,9 @@ On Windows, in an **elevated Git Bash** (the key lives beside the Pane token):
 
 ```bash
 mkdir -p /c/ProgramData/telemetry/secrets
-ssh-keygen -q -t ed25519 -N '' -C "telemetry@$(hostname)" -f /c/ProgramData/telemetry/secrets/deploy_key
 icacls 'C:\ProgramData\telemetry\secrets' /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F'
+icacls 'C:\ProgramData\telemetry\secrets' /setowner '*S-1-5-32-544'
+ssh-keygen -q -t ed25519 -N '' -C "telemetry@$(hostname)" -f /c/ProgramData/telemetry/secrets/deploy_key
 cat /c/ProgramData/telemetry/secrets/deploy_key.pub
 ```
 
@@ -41,11 +42,15 @@ with the box's name, and leave **Allow write access** off.
 ```bash
 KEY=/etc/telemetry/deploy_key     # Windows: /c/ProgramData/telemetry/secrets/deploy_key
 DIR=/opt/telemetry                # Windows: /c/telemetry
-echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > /tmp/github_known_hosts
-sudo env GIT_SSH_COMMAND="ssh -i $KEY -o IdentitiesOnly=yes -o UserKnownHostsFile=/tmp/github_known_hosts" \
+KH="$(mktemp)"
+echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > "$KH"
+sudo env GIT_SSH_COMMAND="ssh -F /dev/null -i $KEY -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o GlobalKnownHostsFile=/dev/null -o UserKnownHostsFile=$KH" \
     git clone -q git@github.com:maloriedelilah/system-telemetry.git "$DIR"
-cd "$DIR" && sudo ./update.sh && sudo ./install.sh
+cd "$DIR" && sudo ./update.sh && sudo ./install.sh; rm -f "$KH"
 ```
+
+On Windows the secrets folder is locked to SYSTEM and Administrators **before** the key is made,
+so the key never inherits Users:RX.
 
 (On Windows, drop the `sudo`.) `update.sh` checks out the newest release tag, and
 `install.sh` asks for the MQTT broker (or `none` for a Pane-only box), the optional Pane URL,
@@ -73,11 +78,20 @@ It fetches the tag with the box's deploy key, checks it out, then re-runs as the
 to tracked files (nothing is changed). `.env`, `venv/`, `secrets/` and `logs/` are git-ignored,
 so an update never touches them.
 
+**Every `vX.Y.Z` tag is code each box runs as root** at its next update (the checkout, then
+pip and the restart). Protect them: on GitHub, Settings → Rules → Rulesets → New tag ruleset,
+target `v*`, restrict creations, updates and deletions to the repo admin.
+
+If an update stops after the checkout (pip or the restart failed), fix the cause and run
+`./update.sh` again: it records each finished update, so it finishes instead of saying
+"already there". A conversion that fails before its checkout removes the `.git` it started,
+and one interrupted midway is resumed.
+
 **A box installed from the old release tarball** (no `.git`; slimridge, Eighty-Eight,
 SilverPancake) converts itself on its first run of the new `update.sh`. Make its deploy key
 (steps 1 and 2), copy the new `update.sh` into the install dir once (scp it from a
-workstation), and run it. Tracked files are replaced; `.env`, the venv, `secrets/` and the
-logs are kept.
+workstation), and run it. Files that differ from the release are copied to `.pre-update-<time>/` and listed, then
+replaced; `.env`, the venv, `secrets/` and the logs are kept.
 
 ## Cut a release (maintainer)
 
@@ -104,7 +118,7 @@ telemetry/          the package
   __main__.py       orchestrator (python -m telemetry)
 install.sh          interactive installer (prompts -> .env, venv, service)
 update.sh           move to the newest release tag (deploy key) + deps + restart
-release.sh          maintainer: bump, tag, publish release asset
+release.sh          maintainer: bump, tag vX.Y.Z, create the GitHub release
 .env.example        config schema reference (the installer writes the real .env)
 service/            systemd unit/timer + NSSM reference
 ```

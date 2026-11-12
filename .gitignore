@@ -8,6 +8,9 @@ pane_token
 logs/
 *.log
 
+# Copies update.sh keeps of files a conversion replaced
+.pre-update-*/
+
 # Python
 __pycache__/
 *.py[cod]
