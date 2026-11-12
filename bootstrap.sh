@@ -7,8 +7,9 @@
 #
 # Detects the OS, downloads the latest release tarball, extracts it to the
 # canonical install dir, and hands off to the interactive installer. No git,
-# no keys — the repo is public. An existing .env is preserved (re-running
-# bootstrap upgrades the code without touching your config).
+# no keys while the repo was public. It is private now, so this needs a read
+# credential (OPS-19); see the README's Install note. An existing .env is
+# preserved (re-running bootstrap upgrades the code without touching your config).
 #
 # Override the target dir:  TELEMETRY_DIR=/custom/path curl ... | bash
 # ---------------------------------------------------------------------------

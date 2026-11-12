@@ -430,6 +430,16 @@ def test_non_http_url_rejected_without_request():
     assert_house(c.err.getvalue(), "PANE_URL is not an http(s) URL")
 
 
+def test_url_with_userinfo_rejected_without_printing_it():
+    for url in ("http://kiosk:s3cr3t-token@100.92.61.42:8427", "https://s3cr3t-token@pane:8427",
+                "file://u:s3cr3t-token@x/"):
+        setup(url)
+        with Capture() as c:
+            assert pane.push(["telemetry up=1,gpus=0"]) is False
+        assert_house(c.err.getvalue(), "PANE_URL has a user or token in it")
+        assert "s3cr3t-token" not in c.err.getvalue() + c.out.getvalue()
+
+
 # ---------------------------------------------------------------------------
 # run_once: independent outputs
 # ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# release.sh — cut a versioned release and publish it as a PUBLIC GitHub asset.
+# release.sh — cut a versioned release and publish it as a GitHub release asset.
 # Dev-machine tool: run from inside the repo clone. Needs git, gh, tar.
 #
 #   ./release.sh           # bump patch  (1.0.0 -> 1.0.1)
@@ -10,7 +10,7 @@
 #
 # Bumps telemetry/__init__.py, commits, tags vX.Y.Z, pushes, builds
 # system-telemetry.tar.gz, and uploads it to the GitHub release marked latest.
-# Public repo => the install URL below is keyless.
+# The repo is private: boxes can't use this URL without a credential (OPS-19).
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
@@ -71,5 +71,5 @@ gh release create "$TAG" "$ASSET" \
     --repo "$OWNER/$REPO" --title "$TAG" --notes "system-telemetry $NEW" --latest
 
 rm -f "$ASSET"
-say "Done. Keyless install URL:"
+say "Done. Release asset (private repo: boxes need a credential to fetch it, see OPS-19):"
 echo "  https://github.com/$OWNER/$REPO/releases/latest/download/$ASSET"

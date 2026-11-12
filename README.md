@@ -6,18 +6,24 @@ Mosquitto with Home Assistant MQTT discovery so everything auto-appears in HA,
 and (optionally) pushes the same readings to [Pane](#pane).
 
 One codebase, one `.env` schema, one install path per OS. No per-machine folder
-drift, no hand-edited copies, no keys — the repo is public and ships versioned
-releases.
+drift, no hand-edited copies. The repo is **private** (it describes too much of the
+fleet to publish) and ships versioned releases.
 
 ## Install (one command)
 
 In a shell on Linux, or **Git Bash** on Windows:
 
+> **The repo is private, so the keyless `curl` below no longer works.** Per-box read
+> credentials for install and update are being designed (OPS-19). Until they land:
+> on a machine where `gh` is signed in, `gh release download -R maloriedelilah/system-telemetry
+> -p system-telemetry.tar.gz`, copy the tarball to the box, extract it into the install
+> directory, and run `./install.sh` (or, to upgrade, what `update.sh` does after its download).
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/maloriedelilah/system-telemetry/main/bootstrap.sh | bash
 ```
 
-That downloads the latest release, drops it at `/opt/telemetry` (Linux) or
+On a public repo, that downloads the latest release, drops it at `/opt/telemetry` (Linux) or
 `C:\telemetry` (Windows), and runs the interactive installer. It asks for the
 MQTT broker (or `none` for a Pane-only box), the optional Pane URL, which collectors
 this box runs (NVIDIA / LHM / Arc GPUs), and the model-label source, then writes `.env`, builds the venv, and registers the
@@ -57,8 +63,8 @@ From a clone of the repo, with `gh` authed:
 ```
 
 Bumps `telemetry/__init__.py`, tags `vX.Y.Z`, pushes, and publishes
-`system-telemetry.tar.gz` as the release asset marked *latest* — which is what
-`bootstrap.sh` and `update.sh` pull, keylessly, on every box.
+`system-telemetry.tar.gz` as the release asset marked *latest*, which is what
+`bootstrap.sh` and `update.sh` download (see the private-repo note under Install).
 
 ## Layout
 
