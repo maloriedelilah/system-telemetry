@@ -4,6 +4,13 @@
 secrets/
 pane_token
 
+# Service logs (Windows NSSM writes logs/ in the install dir)
+logs/
+*.log
+
+# Copies update.sh keeps of files a conversion replaced
+.pre-update-*/
+
 # Python
 __pycache__/
 *.py[cod]

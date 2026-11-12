@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
 # install.sh — interactive installer. Runs identically on Linux and on Windows
-# via Git Bash / msys. Normally invoked by bootstrap.sh, but also works directly:
+# via Git Bash / msys. Run it after update.sh on a fresh checkout (README, First install):
 #
 #     cd /opt/telemetry        (or  cd /c/telemetry  in Git Bash)
 #     ./install.sh             # first run: prompts and writes .env
@@ -214,9 +214,15 @@ if [[ "$OS" == linux ]]; then
     RUN_USER="${SUDO_USER:-$USER}"
     command -v python3 >/dev/null || die "python3 not found."
     say "Creating venv…"
-    python3 -m venv "$INSTALL_DIR/venv"
-    "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade pip
-    "$INSTALL_DIR/venv/bin/pip" install --quiet -r "$INSTALL_DIR/requirements.txt"
+    # A venv the service user already owns is rebuilt AS that user: running its pip as root would
+    # run whatever that user put there as root (Errata, OPS-19 L5).
+    AS=()
+    if [[ -d "$INSTALL_DIR/venv" && "$(stat -c %U "$INSTALL_DIR/venv")" != root ]]; then
+        AS=(runuser -u "$(stat -c %U "$INSTALL_DIR/venv")" --)
+    fi
+    "${AS[@]}" python3 -m venv "$INSTALL_DIR/venv"
+    "${AS[@]}" "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade pip
+    "${AS[@]}" "$INSTALL_DIR/venv/bin/pip" install --quiet -r "$INSTALL_DIR/requirements.txt"
     chown -R "$RUN_USER" "$INSTALL_DIR/venv" 2>/dev/null || true
     # .env is written root-owned (umask 077 under the sudo re-exec), but the
     # service runs as $RUN_USER. Hand it over so config.py can read it; mode

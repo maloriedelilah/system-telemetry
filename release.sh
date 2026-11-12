@@ -1,22 +1,21 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# release.sh — cut a versioned release and publish it as a PUBLIC GitHub asset.
-# Dev-machine tool: run from inside the repo clone. Needs git, gh, tar.
+# release.sh — cut a versioned release: bump, tag vX.Y.Z, push, GitHub release.
+# Dev-machine tool: run from inside the repo clone. Needs git and gh.
 #
 #   ./release.sh           # bump patch  (1.0.0 -> 1.0.1)
 #   ./release.sh minor     #             (1.0.0 -> 1.1.0)
 #   ./release.sh major     #             (1.0.0 -> 2.0.0)
 #   ./release.sh 1.4.2      # set explicit version
 #
-# Bumps telemetry/__init__.py, commits, tags vX.Y.Z, pushes, builds
-# system-telemetry.tar.gz, and uploads it to the GitHub release marked latest.
-# Public repo => the install URL below is keyless.
+# Bumps telemetry/__init__.py, commits, tags vX.Y.Z, pushes, and creates the
+# GitHub release. Boxes move to the newest tag with ./update.sh, reading the
+# private repo with their own deploy key (OPS-19). No tarball any more.
 # ---------------------------------------------------------------------------
 set -euo pipefail
 
 OWNER="maloriedelilah"
 REPO="system-telemetry"
-ASSET="system-telemetry.tar.gz"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
@@ -25,7 +24,6 @@ die() { printf '\033[1;31mxx\033[0m  %s\n' "$*" >&2; exit 1; }
 
 command -v git >/dev/null || die "git not found."
 command -v gh  >/dev/null || die "gh (GitHub CLI) not found. Install it, then 'gh auth login'."
-command -v tar >/dev/null || die "tar not found."
 
 INIT="telemetry/__init__.py"
 cur="$(grep -E "^__version__" "$INIT" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+")"
@@ -58,18 +56,8 @@ say "Pushing commit + tag…"
 git push origin HEAD
 git push origin "$TAG"
 
-say "Building $ASSET…"
-rm -f "$ASSET"
-# Build from the committed tree, not the working dir. Avoids tar's
-# "file changed as we read it" abort (writing $ASSET into the dir being read
-# mutates '.'), drops untracked cruft (.env/venv/logs/__pycache__) for free, and
-# honors .gitattributes EOL so Windows autocrlf can't ship CRLF .sh files to Linux.
-git archive --format=tar.gz -o "$ASSET" HEAD
-
 say "Publishing GitHub release $TAG…"
-gh release create "$TAG" "$ASSET" \
+gh release create "$TAG" \
     --repo "$OWNER/$REPO" --title "$TAG" --notes "system-telemetry $NEW" --latest
 
-rm -f "$ASSET"
-say "Done. Keyless install URL:"
-echo "  https://github.com/$OWNER/$REPO/releases/latest/download/$ASSET"
+say "Done: $TAG. On each box: sudo ./update.sh"

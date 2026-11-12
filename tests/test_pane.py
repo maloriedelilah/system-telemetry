@@ -430,6 +430,31 @@ def test_non_http_url_rejected_without_request():
     assert_house(c.err.getvalue(), "PANE_URL is not an http(s) URL")
 
 
+def test_url_with_userinfo_rejected_without_printing_it():
+    for url in ("http://kiosk:s3cr3t-token@100.92.61.42:8427", "https://s3cr3t-token@pane:8427",
+                "file://u:s3cr3t-token@x/", "kiosk:s3cr3t-token@100.92.61.42:8427",
+                "s3cr3t-token@pane:8427"):
+        setup(url)
+        with Capture() as c:
+            assert pane.push(["telemetry up=1,gpus=0"]) is False
+        assert_house(c.err.getvalue(), "PANE_URL has a user or token in it")
+        assert "s3cr3t-token" not in c.err.getvalue() + c.out.getvalue()
+
+
+def test_url_shapes_that_could_hold_a_token_are_refused_without_echo():
+    cases = {"notaurl-s3cr3t-token": "PANE_URL is not an http(s) URL",
+             "http://pane:8427/?token=s3cr3t-token": "PANE_URL has more than a scheme, host and port",
+             "http://pane:8427/s3cr3t-token": "PANE_URL has more than a scheme, host and port",
+             "https://pane:8427#s3cr3t-token": "PANE_URL has more than a scheme, host and port",
+             "kiosk:x@pane:8427/?t=s3cr3t-token": "PANE_URL has a user or token in it"}
+    for url, title in cases.items():
+        setup(url)
+        with Capture() as c:
+            assert pane.push(["telemetry up=1,gpus=0"]) is False
+        assert_house(c.err.getvalue(), title)
+        assert "s3cr3t-token" not in c.err.getvalue() + c.out.getvalue(), url
+
+
 # ---------------------------------------------------------------------------
 # run_once: independent outputs
 # ---------------------------------------------------------------------------
