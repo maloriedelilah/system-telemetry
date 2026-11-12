@@ -27,7 +27,8 @@ printf '__version__ = "1.0.0"\n' >"$origin/telemetry/__init__.py"
 sed -i 's/Skipping pip and the service/Skipping pip and the service (new update.sh)/' "$origin/update.sh"
 printf '__version__ = "1.1.0"\n' >"$origin/telemetry/__init__.py"
 "${G[@]}" -C "$origin" commit -qam v1.1.0
-"${G[@]}" -C "$origin" tag -a v1.1.0 -m v1.1.0
+# Lightweight, as release.sh's tags are (GitHub makes them); v1.0.0 above is annotated.
+"${G[@]}" -C "$origin" tag v1.1.0
 # A tag whose name merely ends like a release must never be picked (Errata, OPS-19 L2).
 "${G[@]}" -C "$origin" tag x/refs/tags/v99.0.0 v1.0.0
 export TELEMETRY_REPO="$origin" TELEMETRY_SKIP_SERVICE=1

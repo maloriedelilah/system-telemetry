@@ -95,16 +95,19 @@ replaced; `.env`, the venv, `secrets/` and the logs are kept.
 
 ## Cut a release (maintainer)
 
-From a clone of the repo, with `gh` authed:
+One command, from any clone of the repo, with `gh` authed:
 
 ```bash
-./release.sh          # bump patch  (1.0.0 -> 1.0.1)
-./release.sh minor    #             (1.0.0 -> 1.1.0)
-./release.sh 1.4.2    # explicit version
+./release.sh          # next patch  (v1.4.0 -> v1.4.1)
+./release.sh minor    #             (v1.4.0 -> v1.5.0)
+./release.sh v1.6.0   # a specific version, newer than the newest
 ```
 
-Bumps `telemetry/__init__.py`, commits, tags `vX.Y.Z`, pushes, and creates the GitHub
-release. Boxes pick up the newest tag with `./update.sh`.
+GitHub tags main's current commit `vX.Y.Z` and publishes the release, with notes listing
+the merged PRs. The tag is the version: nothing in the code is bumped, so nothing is
+committed or pushed (main takes changes only through PRs). It releases GitHub's main as it
+is (not your clone's files), only once main's CI has passed on that commit, and refuses if
+main hasn't changed since the last release. Boxes pick up the newest tag with `./update.sh`.
 
 ## Layout
 
@@ -118,7 +121,7 @@ telemetry/          the package
   __main__.py       orchestrator (python -m telemetry)
 install.sh          interactive installer (prompts -> .env, venv, service)
 update.sh           move to the newest release tag (deploy key) + deps + restart
-release.sh          maintainer: bump, tag vX.Y.Z, create the GitHub release
+release.sh          maintainer: tag main vX.Y.Z and publish the release (one command)
 .env.example        config schema reference (the installer writes the real .env)
 service/            systemd unit/timer + NSSM reference
 ```
