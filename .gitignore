@@ -4,6 +4,10 @@
 secrets/
 pane_token
 
+# Service logs (Windows NSSM writes logs/ in the install dir)
+logs/
+*.log
+
 # Python
 __pycache__/
 *.py[cod]

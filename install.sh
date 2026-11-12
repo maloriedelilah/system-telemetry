@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
 # install.sh — interactive installer. Runs identically on Linux and on Windows
-# via Git Bash / msys. Normally invoked by bootstrap.sh, but also works directly:
+# via Git Bash / msys. Run it after update.sh on a fresh checkout (README, First install):
 #
 #     cd /opt/telemetry        (or  cd /c/telemetry  in Git Bash)
 #     ./install.sh             # first run: prompts and writes .env

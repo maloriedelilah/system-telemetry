@@ -7,50 +7,77 @@ and (optionally) pushes the same readings to [Pane](#pane).
 
 One codebase, one `.env` schema, one install path per OS. No per-machine folder
 drift, no hand-edited copies. The repo is **private** (it describes too much of the
-fleet to publish) and ships versioned releases.
+fleet to publish); each box is a checkout of a release tag, read with its own deploy key.
 
-## Install (one command)
+## First install (once per box)
 
-In a shell on Linux, or **Git Bash** on Windows:
+The repo is private. Each box reads it over SSH with **its own read-only deploy key**, the
+same way every app reaches its box (OPS-19). Prime will do this when it provisions boxes;
+until then it's a one-time setup per box.
 
-> **The repo is private, so the keyless `curl` below no longer works.** Per-box read
-> credentials for install and update are being designed (OPS-19). Until they land:
-> on a machine where `gh` is signed in, `gh release download -R maloriedelilah/system-telemetry
-> -p system-telemetry.tar.gz`, copy the tarball to the box, extract it into the install
-> directory, and run `./install.sh` (or, to upgrade, what `update.sh` does after its download).
+**1. Make the box's key** (Linux, as root):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/maloriedelilah/system-telemetry/main/bootstrap.sh | bash
+sudo install -d -m 700 /etc/telemetry
+sudo ssh-keygen -q -t ed25519 -N '' -C "telemetry@$(hostname)" -f /etc/telemetry/deploy_key
+sudo cat /etc/telemetry/deploy_key.pub
 ```
 
-On a public repo, that downloads the latest release, drops it at `/opt/telemetry` (Linux) or
-`C:\telemetry` (Windows), and runs the interactive installer. It asks for the
-MQTT broker (or `none` for a Pane-only box), the optional Pane URL, which collectors
-this box runs (NVIDIA / LHM / Arc GPUs), and the model-label source, then writes `.env`, builds the venv, and registers the
-service — **systemd timer** on Linux (single-shot every 30s), **NSSM loop** on
-Windows.
+On Windows, in an **elevated Git Bash** (the key lives beside the Pane token):
 
-On Windows the installer registers the NSSM service and starts it as LocalSystem
-— no password step, the service is live when the installer finishes. (Run the
-installer from an elevated Git Bash so NSSM can register the service.)
+```bash
+mkdir -p /c/ProgramData/telemetry/secrets
+ssh-keygen -q -t ed25519 -N '' -C "telemetry@$(hostname)" -f /c/ProgramData/telemetry/secrets/deploy_key
+icacls 'C:\ProgramData\telemetry\secrets' /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F'
+cat /c/ProgramData/telemetry/secrets/deploy_key.pub
+```
+
+**2. Add the `.pub`** on GitHub: the repo's Settings → Deploy keys → Add deploy key. Title it
+with the box's name, and leave **Allow write access** off.
+
+**3. Clone and install.** GitHub's host key is pinned, so ssh never asks (fingerprint
+`SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU`, from api.github.com/meta):
+
+```bash
+KEY=/etc/telemetry/deploy_key     # Windows: /c/ProgramData/telemetry/secrets/deploy_key
+DIR=/opt/telemetry                # Windows: /c/telemetry
+echo 'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' > /tmp/github_known_hosts
+sudo env GIT_SSH_COMMAND="ssh -i $KEY -o IdentitiesOnly=yes -o UserKnownHostsFile=/tmp/github_known_hosts" \
+    git clone -q git@github.com:maloriedelilah/system-telemetry.git "$DIR"
+cd "$DIR" && sudo ./update.sh && sudo ./install.sh
+```
+
+(On Windows, drop the `sudo`.) `update.sh` checks out the newest release tag, and
+`install.sh` asks for the MQTT broker (or `none` for a Pane-only box), the optional Pane URL,
+which collectors this box runs (NVIDIA / LHM / Arc GPUs) and the model-label source. It then
+writes `.env`, builds the venv and registers the service: a **systemd timer** on Linux
+(single-shot every 30 s), an **NSSM loop** on Windows, started as LocalSystem.
 
 Re-run to reconfigure:
 
 ```bash
 cd /opt/telemetry   # or  cd /c/telemetry
-./install.sh --reconfigure
+sudo ./install.sh --reconfigure
 ```
 
 ## Update
 
 ```bash
-cd /opt/telemetry   # or  cd /c/telemetry
-./update.sh
+cd /opt/telemetry   # or  cd /c/telemetry (elevated Git Bash)
+sudo ./update.sh            # the newest vX.Y.Z tag
+sudo ./update.sh v1.4.0     # or a specific one
 ```
 
-Pulls the latest published release over the install (your `.env`, venv, and logs
-are preserved), refreshes deps, and restarts/triggers the service. No git on the
-box — it just re-fetches the release tarball.
+It fetches the tag with the box's deploy key, checks it out, then re-runs as the new
+`update.sh` to refresh deps and restart the service. It refuses an install with local changes
+to tracked files (nothing is changed). `.env`, `venv/`, `secrets/` and `logs/` are git-ignored,
+so an update never touches them.
+
+**A box installed from the old release tarball** (no `.git`; slimridge, Eighty-Eight,
+SilverPancake) converts itself on its first run of the new `update.sh`. Make its deploy key
+(steps 1 and 2), copy the new `update.sh` into the install dir once (scp it from a
+workstation), and run it. Tracked files are replaced; `.env`, the venv, `secrets/` and the
+logs are kept.
 
 ## Cut a release (maintainer)
 
@@ -62,9 +89,8 @@ From a clone of the repo, with `gh` authed:
 ./release.sh 1.4.2    # explicit version
 ```
 
-Bumps `telemetry/__init__.py`, tags `vX.Y.Z`, pushes, and publishes
-`system-telemetry.tar.gz` as the release asset marked *latest*, which is what
-`bootstrap.sh` and `update.sh` download (see the private-repo note under Install).
+Bumps `telemetry/__init__.py`, commits, tags `vX.Y.Z`, pushes, and creates the GitHub
+release. Boxes pick up the newest tag with `./update.sh`.
 
 ## Layout
 
@@ -76,9 +102,8 @@ telemetry/          the package
   mqtt.py           HA discovery + state publishing
   pane.py           Influx line protocol + push to Pane
   __main__.py       orchestrator (python -m telemetry)
-bootstrap.sh        one-command remote installer (curl | bash entry point)
 install.sh          interactive installer (prompts -> .env, venv, service)
-update.sh           pull latest release + deps + restart
+update.sh           move to the newest release tag (deploy key) + deps + restart
 release.sh          maintainer: bump, tag, publish release asset
 .env.example        config schema reference (the installer writes the real .env)
 service/            systemd unit/timer + NSSM reference
