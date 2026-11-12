@@ -432,7 +432,8 @@ def test_non_http_url_rejected_without_request():
 
 def test_url_with_userinfo_rejected_without_printing_it():
     for url in ("http://kiosk:s3cr3t-token@100.92.61.42:8427", "https://s3cr3t-token@pane:8427",
-                "file://u:s3cr3t-token@x/"):
+                "file://u:s3cr3t-token@x/", "kiosk:s3cr3t-token@100.92.61.42:8427",
+                "s3cr3t-token@pane:8427"):
         setup(url)
         with Capture() as c:
             assert pane.push(["telemetry up=1,gpus=0"]) is False

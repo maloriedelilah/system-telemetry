@@ -31,7 +31,6 @@ import os
 import re
 import sys
 import urllib.error
-import urllib.parse
 import urllib.request
 
 from . import config
@@ -250,9 +249,11 @@ def push(lines):
     base = config.PANE_URL
     # A token pasted into the URL (http://user:token@host) would land in every message below. Refuse it
     # first, and never print that part (OPS-19, Errata's OPS-18 Low).
-    netloc = urllib.parse.urlsplit(base).netloc
-    if "@" in netloc:
-        shown = f"{base.split('://', 1)[0]}://<removed>@{netloc.rsplit('@', 1)[1]}"
+    # Any "@" counts, scheme or not: "kiosk:TOKEN@host:8427" parses with "kiosk" as its scheme and an
+    # empty netloc, and must still never be echoed (Errata, OPS-19 L1).
+    if "@" in base:
+        prefix = base.split("://", 1)[0] + "://" if "://" in base.split("@", 1)[0] else ""
+        shown = f"{prefix}<removed>@{base.rsplit('@', 1)[1]}"
         config.report("PANE_URL has a user or token in it", f"read PANE_URL ({shown})",
                       "PANE_URL like http://100.92.61.42:8427, with the token only in PANE_TOKEN_FILE",
                       "a user:password@ part (not shown)",
