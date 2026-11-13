@@ -67,18 +67,17 @@ g() { git "${GITC[@]}" -C "$INSTALL_DIR" "$@"; }
 
 # --- finish: runs as the NEW update.sh, after the checkout ------------------
 finish() {
-    local tag="$1" version py owner
-    version="$(sed -n 's/^__version__ = "\(.*\)"/\1/p' "$INSTALL_DIR/telemetry/__init__.py")"
-    SO_FAR="checked out $tag (telemetry $version); the deps and the service aren't refreshed yet"
+    local tag="$1" py owner
+    SO_FAR="checked out $tag; the deps and the service aren't refreshed yet"
     NEXT_ON_ERR="fix the cause, then run ./update.sh again: it finishes $tag (it knows the last finish didn't complete)."
     if [[ "${TELEMETRY_SKIP_SERVICE:-0}" == 1 ]]; then
         printf '%s\n' "$tag" >"$FINISHED"
-        say "At $tag (telemetry $version). Skipping pip and the service (TELEMETRY_SKIP_SERVICE=1)."
+        say "At $tag. Skipping pip and the service (TELEMETRY_SKIP_SERVICE=1)."
         return 0
     fi
     if [[ "$OS" == linux ]]; then py="$INSTALL_DIR/venv/bin/python"; else py="$INSTALL_DIR/venv/Scripts/python.exe"; fi
     if [[ ! -x "$py" ]]; then
-        say "At $tag (telemetry $version). No venv yet: run ./install.sh to finish the first install."
+        say "At $tag. No venv yet: run ./install.sh to finish the first install."
         return 0
     fi
     say "Refreshing deps…"
@@ -94,19 +93,19 @@ finish() {
     else
         "$py" -m pip install --quiet -r "$INSTALL_DIR/requirements.txt"
     fi
-    SO_FAR="checked out $tag (telemetry $version); deps refreshed; the service isn't restarted yet"
+    SO_FAR="checked out $tag; deps refreshed; the service isn't restarted yet"
     if [[ "$OS" == linux ]]; then
         # --no-block: the unit is a oneshot run by a timer; a failing telemetry run is the service's
         # business (journalctl), not a failed update.
         STEP="systemctl start --no-block ${SERVICE_NAME}.service"
         systemctl start --no-block "${SERVICE_NAME}.service"
         printf '%s\n' "$tag" >"$FINISHED"
-        say "Done: telemetry $version. Check: journalctl -u ${SERVICE_NAME}.service -n 20 --no-pager"
+        say "Done: telemetry $tag. Check: journalctl -u ${SERVICE_NAME}.service -n 20 --no-pager"
     else
         STEP="nssm restart $SERVICE_NAME"
         nssm restart "$SERVICE_NAME"
         printf '%s\n' "$tag" >"$FINISHED"
-        say "Done: telemetry $version. Logs: $INSTALL_DIR/logs/telemetry.err.log"
+        say "Done: telemetry $tag. Logs: $INSTALL_DIR/logs/telemetry.err.log"
     fi
 }
 
