@@ -10,7 +10,7 @@
 # Fleet mode (Linux, no questions; pane's telemetry-install.sh uses it, OPS-47):
 #
 #     sudo ./install.sh --profile host|gpu|vm --pane-url http://<pane>:8427 \
-#         [--models llamaserver=URL[,URL] | --models ollama=URL] [--run-user telemetry] [--token-stdin]
+#         [--models llamaserver=URL[,URL] | --models ollama=URL] [--run-user telemetry] [--token-stdin] [--sites]
 #
 #   host  CPU/RAM/disk (psutil + hwmon)       gpu  host + NVIDIA       vm  host, for VMs (no sensors)
 #   MQTT is off in every profile (fleet boxes report to Pane only). The profile always
@@ -19,6 +19,9 @@
 #                default: the account that ran sudo.
 #   --token-stdin  read this box's Pane token (from pane's add-box.sh) on stdin and save it
 #                  to secrets/pane_token, 0400, owned by the run user.
+#   --sites        also probe the public sites in sites.txt (TELEMETRY_SITES=1; pane only, OPS-59).
+#   The install dir must be root's in fleet mode, as update.sh requires: secrets/ is safe only
+#   inside a directory the run user can't rearrange.
 #
 # First run with no .env: prompts for MQTT, roles, and model source, writes
 # .env, builds the venv, and registers the service. Re-running with an existing
@@ -35,7 +38,7 @@ INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TTY_R="${TELEMETRY_TTY_R:-/dev/tty}"      # terminal for reading answers (overridable for tests)
 TTY_W="${TELEMETRY_TTY_W:-/dev/tty}"      # terminal for writing prompts
 RECONFIGURE=0
-PROFILE="" PANE_URL_ARG="" MODELS_ARG="" RUN_USER_ARG="" TOKEN_STDIN=0
+PROFILE="" PANE_URL_ARG="" MODELS_ARG="" RUN_USER_ARG="" TOKEN_STDIN=0 SITES=0
 ORIG_ARGS=("$@")
 
 say()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
@@ -55,8 +58,9 @@ while [[ $# -gt 0 ]]; do
         --models)      MODELS_ARG="${2:-}"; shift 2 || shift ;;
         --run-user)    RUN_USER_ARG="${2:-}"; shift 2 || shift ;;
         --token-stdin) TOKEN_STDIN=1; shift ;;
+        --sites)       SITES=1; shift ;;
         *) report "unknown argument" "read the command line" \
-               "--reconfigure, or --profile host|gpu|vm --pane-url URL [--models ...] [--run-user NAME] [--token-stdin]" \
+               "--reconfigure, or --profile host|gpu|vm --pane-url URL [--models ...] [--run-user NAME] [--token-stdin] [--sites]" \
                "'$1'" "check the command (the header of install.sh lists the options). Nothing was changed."
            exit 2 ;;
     esac
@@ -227,7 +231,7 @@ MODEL_FILTER=$MODEL_FILTER
 LOOP_INTERVAL=$LOOP
 DEBUG=0
 ENV
-    mv -f "$tmp" "$INSTALL_DIR/.env"
+    mv -f -T "$tmp" "$INSTALL_DIR/.env"
     say "Wrote $INSTALL_DIR/.env"
 }
 
@@ -277,6 +281,19 @@ if [[ -n "$PROFILE" ]]; then
             "'$RUN_USER_ARG' (uid 0)" "use --run-user telemetry (created if missing). Nothing was changed."
         exit 2
     fi
+    # The same check update.sh makes (Errata, OPS-47 Low): a run user that owned the install dir
+    # could swap secrets/ itself for a link between our check and our chown.
+    for p in "$INSTALL_DIR" "$INSTALL_DIR/.git"; do
+        if [[ -e "$p" && "$(stat -c %u "$p")" != 0 ]]; then
+            report "the install dir isn't root's" "stat -c %U $p" "owned by root (fleet mode keeps the token here)" \
+                "owned by $(stat -c %U "$p")" "if nobody changed it on purpose, find out who did; then: chown root:root $p, and run this again. Nothing was changed."
+            exit 2
+        fi
+    done
+elif [[ "$SITES" -eq 1 ]]; then
+    report "--sites is for fleet mode" "read --sites" "--profile ... --sites" "--sites without --profile" \
+        "add --profile (the interactive install doesn't set TELEMETRY_SITES). Nothing was changed."
+    exit 2
 fi
 
 # The token, read now (before anything changes) so a bad paste stops the run cleanly.
@@ -318,6 +335,7 @@ LHM_GPUS=0
 LHM_URL=http://localhost:8085/data.json
 LHM_GPU_INCLUDE=
 TELEMETRY_HOST=1
+TELEMETRY_SITES=$SITES
 
 MODEL_SOURCE=$MODEL_SOURCE_F
 MODEL_API_URL=$MODEL_URL_F
@@ -327,7 +345,7 @@ MODEL_FILTER=
 LOOP_INTERVAL=
 DEBUG=0
 ENV
-    mv -f "$tmp" "$INSTALL_DIR/.env"
+    mv -f -T "$tmp" "$INSTALL_DIR/.env"
     say "Wrote $INSTALL_DIR/.env (profile $PROFILE)"
 }
 
@@ -381,7 +399,10 @@ if [[ "$OS" == linux ]]; then
             printf '%s' "$TOKEN" > "$tmp"
             chown -h "$RUN_USER:$group" "$tmp"
             chmod 0400 "$tmp"
-            mv -f "$tmp" "$tok"
+            # A directory (or anything) planted at the name would swallow the token, so it goes
+            # first, and mv -T never moves into a directory (Errata, OPS-47 Low).
+            if [[ -L "$tok" || ( -e "$tok" && ! -f "$tok" ) ]]; then rm -rf -- "$tok"; fi
+            mv -f -T "$tmp" "$tok"
             say "Saved the Pane token to $tok (0400, $RUN_USER)."
         elif [[ -L "$tok" || ( -e "$tok" && ( ! -f "$tok" || "$(stat -c %h "$tok")" != 1 ) ) ]]; then
             rm -rf -- "$tok"

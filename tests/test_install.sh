@@ -43,6 +43,7 @@ check "but can't add anything to secrets/" bash -c '! runuser -u "$1" -- touch "
 check "no temp files left in secrets/" test "$(ls -A "$box/secrets")" = pane_token
 check ".env is 0600 and the run user's" test "$(stat -c '%a %U' "$box/.env")" = "600 $USER_T"
 check "the token is not in .env" bash -c '! grep -qF "$1" "$2"' _ "$TOKEN" "$box/.env"
+check "site probes off by default" envis 'TELEMETRY_SITES=0'
 
 echo "== --profile gpu with model labels, and a rerun restores a drifted .env"
 printf 'MQTT_HOST=192.168.68.76\nTELEMETRY_NVIDIA=0\nDEBUG=1\n' >"$box/.env"
@@ -54,6 +55,12 @@ check "DEBUG is back to 0" envis 'DEBUG=0'
 check "llama-server labels" envis 'MODEL_SOURCE=llamaserver'
 check "both URLs" envis 'MODEL_API_URL=http://127.0.0.1:1234,http://127.0.0.1:1235'
 check "the earlier token is kept when none is given" test "$(cat "$box/secrets/pane_token")" = "$TOKEN"
+
+echo "== --sites turns the site probes on (pane), and a rerun without it turns them off"
+run --profile host --pane-url "$URL" --run-user "$USER_T" --sites || fail "--sites failed" "$(tail -n 6 "$out")"
+check "--sites: TELEMETRY_SITES=1" envis 'TELEMETRY_SITES=1'
+run --profile host --pane-url "$URL" --run-user "$USER_T" || fail "rerun without --sites failed" "$(tail -n 6 "$out")"
+check "no --sites: TELEMETRY_SITES=0" envis 'TELEMETRY_SITES=0'
 
 echo "== --profile vm with ollama labels"
 run --profile vm --pane-url "$URL" --run-user "$USER_T" --models ollama=http://127.0.0.1:11434 || fail "vm profile failed" "$(tail -n 6 "$out")"
@@ -102,6 +109,22 @@ check ".env symlink: the target is untouched" victim_intact
 check ".env symlink: .env is a plain file again" test -f "$box/.env" -a ! -L "$box/.env"
 check ".env symlink: no temp files left" bash -c '! ls -A "$1" | grep -q "^\.env\."' _ "$box"
 
+# A directory planted at secrets/pane_token (the old layout) would swallow the new token: it goes first.
+legacy_secrets
+runuser -u "$USER_T" -- mkdir "$box/secrets/pane_token"
+printf '%s\n' "$TOKEN" | run --profile host --pane-url "$URL" --run-user "$USER_T" --token-stdin \
+    || fail "a token over a planted directory failed" "$(tail -n 6 "$out")"
+check "planted directory: the token is a plain file" test -f "$box/secrets/pane_token" -a ! -L "$box/secrets/pane_token"
+check "planted directory: holding the token" test "$(cat "$box/secrets/pane_token")" = "$TOKEN"
+
+echo "== an install dir the run user owns is refused (as update.sh refuses it), and nothing changes"
+cp "$box/.env" "$work/env.owned"
+chown "$USER_T" "$box"
+if run --profile host --pane-url "$URL" --run-user "$USER_T"; then fail "a run-user-owned install dir was accepted" ""; else CHECKS=$((CHECKS + 1)); fi
+check "owned dir: it says why" has "!!! the install dir isn't root's"
+check "owned dir: .env unchanged" cmp -s "$work/env.owned" "$box/.env"
+chown root "$box"
+
 echo "== bad input is refused and nothing changes"
 cp "$box/.env" "$work/env.before"
 before_tok="$(cat "$box/secrets/pane_token")"
@@ -124,6 +147,7 @@ expect_refused "root as the run user" "!!! --run-user can't be root" '' -- --pro
 expect_refused "a token with spaces" "!!! that isn't a Pane token" "pw_abc def ghi jkl mno pqr" -- --profile host --pane-url "$URL" --token-stdin
 expect_refused "an empty token" "!!! that isn't a Pane token" "" -- --profile host --pane-url "$URL" --token-stdin
 expect_refused "an unknown option" '!!! unknown argument' '' -- --profile host --pane-url "$URL" --force
+expect_refused "--sites without fleet mode" '!!! --sites is for fleet mode' '' -- --sites
 check "a refused token is never echoed" bash -c '! grep -q "pw_abc" "$1"' _ "$out"
 
 echo
