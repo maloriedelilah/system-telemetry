@@ -226,7 +226,7 @@ timestamps and no host tag (Pane adds both). VictoriaMetrics names each series
 | `mem` | `used_gb total_gb used_percent` |
 | `disk,disk=<name>` | `temp_c used_percent` |
 | `telemetry` | `up=1 gpus=<n>` (heartbeat every cycle, even with no GPU) |
-| `site,site=<label>,check=<health\|up>` | `reachable code latency_ms healthy db_ok cert_days` (TELEMETRY_SITES=1) |
+| `site,site=<label>,check=<health\|up>` | `up reachable code latency_ms db_ok cert_days` (TELEMETRY_SITES=1; `site_up` is what Pane's Sites page reads) |
 | `site_probe` | `sites healthy control_ok` (TELEMETRY_SITES=1) |
 
 Readings that are missing or not finite are left out. The GPU memory percentage is
@@ -240,7 +240,7 @@ sends one `site,site=<label>,check=<health|up>` line per site:
 
 - `reachable`: any HTTP answer came back (0 means DNS, refused, timeout or a bad certificate)
 - `code`, `latency_ms`, and `cert_days` (days until the TLS certificate expires)
-- `healthy`: for a `health` line (the default), 200 + a JSON object whose `status` is `ok`
+- `up` (so `site_up`, the name Pane's pages read): for a `health` line (the default), 200 + a JSON object whose `status` is `ok`
   (or `ok` is `true`) and whose `db`, if present, is `ok`; for an `up` line (a site with no
   health endpoint yet), any 2xx. The `check` tag tells the two apart on a dashboard.
 - `db_ok`: from the `db` key, left out when there isn't one

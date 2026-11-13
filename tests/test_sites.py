@@ -501,11 +501,11 @@ def test_site_lines_exact():
     ]
     control = {"reachable": 1, "code": 204}
     assert pane.site_lines(results, control) == [
-        "site,site=write.authortools.net,check=health reachable=1,code=200,latency_ms=41.5,"
-        "healthy=1,db_ok=1,cert_days=63.25",
-        "site,site=lens.authortools.net,check=up reachable=1,code=200,latency_ms=30,healthy=1,"
+        "site,site=write.authortools.net,check=health up=1,reachable=1,code=200,latency_ms=41.5,"
+        "db_ok=1,cert_days=63.25",
+        "site,site=lens.authortools.net,check=up up=1,reachable=1,code=200,latency_ms=30,"
         "cert_days=20",
-        "site,site=gone.example,check=health reachable=0,code=0,healthy=0",
+        "site,site=gone.example,check=health up=0,reachable=0,code=0",
         "site_probe sites=3,healthy=2,control_ok=1",
     ], pane.site_lines(results, control)
     assert pane.site_lines(results[:1], None)[-1] == "site_probe sites=1,healthy=1"
@@ -572,7 +572,7 @@ def test_run_once_pushes_site_lines_with_host_lines():
             assert main.run_once() is True
         body = p.bodies[-1]
         assert "mem used_gb=1,total_gb=2,used_percent=50\n" in body, body
-        assert f"site,site={s.base.split('//', 1)[1]},check=health reachable=1,code=200," in body, body
+        assert f"site,site={s.base.split('//', 1)[1]},check=health up=1,reachable=1,code=200," in body, body
         assert "site_probe sites=1,healthy=1,control_ok=1\n" in body, body
     finally:
         config.SITES_CONTROL_URL = old_ctl
@@ -607,7 +607,7 @@ def test_run_once_unhealthy_site_is_not_a_failed_cycle():
         config.SITES_CONTROL_URL = ""
         with Capture():
             assert main.run_once() is True           # the push worked; the site's state is data
-        assert "reachable=0,code=0,healthy=0" in p.bodies[-1], p.bodies
+        assert "up=0,reachable=0,code=0" in p.bodies[-1], p.bodies
     finally:
         config.SITES_CONTROL_URL = old_ctl
         config.TELEMETRY_SITES = False
