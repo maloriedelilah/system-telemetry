@@ -45,6 +45,22 @@ check ".env is 0600 and the run user's" test "$(stat -c '%a %U' "$box/.env")" = 
 check "the token is not in .env" bash -c '! grep -qF "$1" "$2"' _ "$TOKEN" "$box/.env"
 check "site probes off by default" envis 'TELEMETRY_SITES=0'
 
+echo "== the token is accepted under en_US.UTF-8 too (bash's =~ ranges follow the locale)"
+loc=""
+if locale -a 2>/dev/null | grep -qix 'en_US.utf8'; then loc=en_US.UTF-8
+elif [ -d /usr/share/i18n/locales ] && localedef -i en_US -f UTF-8 "$work/en_US.UTF-8" >/dev/null 2>&1; then
+    export LOCPATH="$work"; loc=en_US.UTF-8
+fi
+if [ -n "$loc" ]; then
+    if printf '%s\n' "$TOKEN" | LC_ALL="$loc" LANG="$loc" bash "$box/install.sh" --profile host --pane-url "$URL" --run-user "$USER_T" --token-stdin >"$out" 2>&1; then
+        CHECKS=$((CHECKS + 1))
+    else fail "a real token was refused under $loc" "$(tail -n 6 "$out")"; fi
+    check "under $loc the token is saved" test "$(cat "$box/secrets/pane_token")" = "$TOKEN"
+    unset LOCPATH
+else
+    echo "   (no en_US.UTF-8 locale here; skipped)"
+fi
+
 echo "== --profile gpu with model labels, and a rerun restores a drifted .env"
 printf 'MQTT_HOST=192.168.68.76\nTELEMETRY_NVIDIA=0\nDEBUG=1\n' >"$box/.env"
 run --profile gpu --pane-url "$URL" --run-user "$USER_T" --models llamaserver=http://127.0.0.1:1234,http://127.0.0.1:1235 \
