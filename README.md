@@ -58,6 +58,19 @@ which collectors this box runs (NVIDIA / LHM / Arc GPUs) and the model-label sou
 writes `.env`, builds the venv and registers the service: a **systemd timer** on Linux
 (single-shot every 30 s), an **NSSM loop** on Windows, started as LocalSystem.
 
+**Fleet mode (Linux, no questions).** Pane serves `telemetry-install.sh`, which does all of the
+above with one line that `add-box.sh` prints. Under the hood it runs:
+
+```bash
+sudo ./install.sh --profile host|gpu|vm --pane-url http://<pane>:8427 --run-user telemetry --token-stdin \
+    [--models llamaserver=http://127.0.0.1:1234,http://127.0.0.1:1235 | --models ollama=URL]
+```
+
+`host` is CPU/RAM/disk, `gpu` adds NVIDIA, and `vm` is for VMs. MQTT is off in every profile.
+The profile rewrites `.env` each time, so rerunning the same line puts a drifted box back on
+the standard. `--token-stdin` reads the Pane token on stdin and saves it 0400 for the run user.
+Missing `git`, `python3-venv` or `python3-pip` are installed first.
+
 Re-run to reconfigure:
 
 ```bash
@@ -188,11 +201,19 @@ The token is never an environment variable, never in `.env`, never on a command
 line and never logged; it is read from the file every cycle, so rotating it needs
 no restart. Get one by running `add-box.sh <box-name>` on pane, then on the box:
 
+The easy way is the installer: rerun your fleet-mode command with `--token-stdin`
+and paste the token (or use Pane's one-line installer, which asks for it).
+
+By hand: install.sh makes `/opt/telemetry/secrets` root's (0750, group = the service
+user's group). The service user can read its token there but can't add, replace or
+link anything, so a rerun of the installer never writes through something it planted.
+Write the file as root, then hand it over:
+
 ```bash
-# Linux. install.sh already created /opt/telemetry/secrets (0700, service user).
 # <service-user> is the account the systemd unit runs as (see User= in the unit).
-sudo -u <service-user> sh -c 'umask 077; cat > /opt/telemetry/secrets/pane_token'
+sudo sh -c 'umask 077; cat > /opt/telemetry/secrets/pane_token'
 #   paste the token, Enter, Ctrl-D
+sudo chown <service-user> /opt/telemetry/secrets/pane_token
 sudo chmod 0400 /opt/telemetry/secrets/pane_token
 ls -l /opt/telemetry/secrets/pane_token     # -r-------- <service-user>
 ```

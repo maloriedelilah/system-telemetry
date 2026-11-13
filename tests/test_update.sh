@@ -156,6 +156,17 @@ TELEMETRY_REPO=git@github.com:example/none.git TELEMETRY_DEPLOY_KEY="$work/nope"
 check "a missing key says how to make one" has '!!! no deploy key on this box'
 check "still at v1.1.0 after both" test "$(at)" = v1.1.0
 
+echo "== update.sh: v1.10.0 is newer than v1.9.0 (by number, not text; Errata, OPS-47 Low)"
+for v in 1.9.0 1.10.0; do
+    printf 'release %s\n' "$v" >"$origin/release.txt"
+    "${G[@]}" -C "$origin" commit -qam "v$v"
+    "${G[@]}" -C "$origin" tag "v$v"
+done
+"${G[@]}" -C "$origin" tag v1.2.0 v1.9.0   # made last, sorts between them as text, oldest as numbers
+bash "$box/update.sh" >"$out" 2>&1 || fail "the update to v1.10.0 failed" "$(tail -n 8 "$out")"
+check "it's at v1.10.0, not v1.9.0 or v1.2.0" test "$(at)" = v1.10.0
+check "with v1.10.0's files" grep -qx 'release 1.10.0' "$box/release.txt"
+
 echo
 if [ "$FAILS" -gt 0 ]; then echo "UPDATE CHECKS FAILED: $FAILS failure(s), $CHECKS passed" >&2; exit 1; fi
 echo "UPDATE CHECKS PASSED: $CHECKS checks"
