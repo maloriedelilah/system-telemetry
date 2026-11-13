@@ -18,6 +18,7 @@ USER_T="tlmtest$$"
 trap 'rm -rf "$work" "$out"; userdel "$USER_T" 2>/dev/null || true' EXIT
 box="$work/box"
 mkdir -p "$box"
+chmod 0755 "$work" "$box"   # so the run user can reach secrets/ (as it can under /opt/telemetry)
 cp -r "$SRC/install.sh" "$SRC/service" "$SRC/requirements.txt" "$box/"
 export TELEMETRY_SKIP_SERVICE=1
 URL="http://100.92.61.42:8427"
@@ -36,7 +37,10 @@ check "the run user was created" user_exists "$USER_T"
 check "the token is saved, exactly" test "$(cat "$box/secrets/pane_token")" = "$TOKEN"
 check "the token file is 0400" test "$(stat -c %a "$box/secrets/pane_token")" = 400
 check "and owned by the run user" test "$(stat -c %U "$box/secrets/pane_token")" = "$USER_T"
-check "secrets/ is 0700, the run user's" test "$(stat -c '%a %U' "$box/secrets")" = "700 $USER_T"
+check "secrets/ is 0750, root's, the run user's group" test "$(stat -c '%a %U %G' "$box/secrets")" = "750 root $(id -gn "$USER_T")"
+check "the run user can read its token" test "$(runuser -u "$USER_T" -- cat "$box/secrets/pane_token")" = "$TOKEN"
+check "but can't add anything to secrets/" bash -c '! runuser -u "$1" -- touch "$2/secrets/x" 2>/dev/null' _ "$USER_T" "$box"
+check "no temp files left in secrets/" test "$(ls -A "$box/secrets")" = pane_token
 check ".env is 0600 and the run user's" test "$(stat -c '%a %U' "$box/.env")" = "600 $USER_T"
 check "the token is not in .env" bash -c '! grep -qF "$1" "$2"' _ "$TOKEN" "$box/.env"
 
@@ -55,6 +59,48 @@ echo "== --profile vm with ollama labels"
 run --profile vm --pane-url "$URL" --run-user "$USER_T" --models ollama=http://127.0.0.1:11434 || fail "vm profile failed" "$(tail -n 6 "$out")"
 check "host stats on, NVIDIA off" bash -c 'grep -qx TELEMETRY_HOST=1 "$1" && grep -qx TELEMETRY_NVIDIA=0 "$1"' _ "$box/.env"
 check "ollama path" envis 'MODEL_API_PATH=/api/ps'
+
+echo "== planted links are never followed (Errata, OPS-47 Blocker)"
+victim="$work/victim"
+plant_victim() { printf 'SECRET\n' >"$victim"; chown root:root "$victim"; chmod 0600 "$victim"; }
+victim_intact() { test "$(stat -c '%U %G %a' "$victim")" = "root root 600" && test "$(cat "$victim")" = SECRET; }
+legacy_secrets() { chown "$USER_T" "$box/secrets"; chmod 0700 "$box/secrets"; rm -f "$box/secrets/pane_token"; }
+# The layout before this fix: secrets/ owned by the run user, which plants a symlink. Rerun, keeping the token.
+plant_victim; legacy_secrets
+runuser -u "$USER_T" -- ln -s "$victim" "$box/secrets/pane_token"
+run --profile host --pane-url "$URL" --run-user "$USER_T" || fail "rerun with a planted symlink failed" "$(tail -n 6 "$out")"
+check "symlink, no token: the target is untouched (owner, mode, contents)" victim_intact
+check "symlink, no token: the link is gone" test ! -e "$box/secrets/pane_token" -a ! -L "$box/secrets/pane_token"
+check "symlink, no token: it says so" has "!!! the saved Pane token wasn't a plain file (removed)"
+check "symlink, no token: secrets/ is root's again" test "$(stat -c %U "$box/secrets")" = root
+# Same, with a new token on stdin: the token replaces the link, the target is untouched.
+plant_victim; legacy_secrets
+runuser -u "$USER_T" -- ln -s "$victim" "$box/secrets/pane_token"
+printf '%s\n' "$TOKEN" | run --profile host --pane-url "$URL" --run-user "$USER_T" --token-stdin \
+    || fail "rerun with a token over a planted symlink failed" "$(tail -n 6 "$out")"
+check "symlink, new token: the target is untouched" victim_intact
+check "symlink, new token: the token is a plain file again" test -f "$box/secrets/pane_token" -a ! -L "$box/secrets/pane_token"
+check "symlink, new token: and holds the token" test "$(cat "$box/secrets/pane_token")" = "$TOKEN"
+# A hard link (protected_hardlinks stops the run user making one; this is the belt to that brace).
+plant_victim; legacy_secrets
+ln "$victim" "$box/secrets/pane_token"
+run --profile host --pane-url "$URL" --run-user "$USER_T" || fail "rerun with a hard link failed" "$(tail -n 6 "$out")"
+check "hard link: the target keeps its owner and mode" victim_intact
+check "hard link: the link is gone" test ! -e "$box/secrets/pane_token"
+# secrets/ itself a symlink: refused, nothing followed.
+plant_victim; rm -rf "$box/secrets"; mkdir -p "$work/elsewhere"; chmod 0700 "$work/elsewhere"
+ln -s "$work/elsewhere" "$box/secrets"
+if run --profile host --pane-url "$URL" --run-user "$USER_T"; then fail "a symlinked secrets/ was accepted" ""; else CHECKS=$((CHECKS + 1)); fi
+check "symlinked secrets/: it says why" has "!!! secrets/ isn't a plain directory"
+check "symlinked secrets/: its target is untouched" test "$(stat -c '%U %a' "$work/elsewhere")" = "root 700"
+rm -f "$box/secrets"
+# .env a symlink (a run user that owned the install dir could plant one): replaced, not written through.
+plant_victim; ln -sf "$victim" "$box/.env"
+printf '%s\n' "$TOKEN" | run --profile host --pane-url "$URL" --run-user "$USER_T" --token-stdin \
+    || fail "rerun with a symlinked .env failed" "$(tail -n 6 "$out")"
+check ".env symlink: the target is untouched" victim_intact
+check ".env symlink: .env is a plain file again" test -f "$box/.env" -a ! -L "$box/.env"
+check ".env symlink: no temp files left" bash -c '! ls -A "$1" | grep -q "^\.env\."' _ "$box"
 
 echo "== bad input is refused and nothing changes"
 cp "$box/.env" "$work/env.before"
