@@ -472,7 +472,8 @@ if [[ "$OS" == linux ]]; then
     systemctl enable --now "${SERVICE_NAME}.timer"
     say "Done. Timer active. Run now:  sudo systemctl start ${SERVICE_NAME}.service"
     say "Logs:  journalctl -u ${SERVICE_NAME}.service -f"
-    [[ -n "$TOKEN" ]] || say "Pane: put this box's token in $INSTALL_DIR/secrets/pane_token (0400, owned by $RUN_USER) — see README."
+    # Only when there is no token at all: a kept token needs nothing (pane's rerun, Nov 13).
+    [[ -n "$TOKEN" || -s "$INSTALL_DIR/secrets/pane_token" ]] || say "Pane: put this box's token in $INSTALL_DIR/secrets/pane_token (0400, owned by $RUN_USER) — see README."
     [[ "$INSTALL_DIR" == /opt/telemetry ]] || \
         say "      Install dir isn't /opt/telemetry: also set PANE_TOKEN_FILE=$INSTALL_DIR/secrets/pane_token in .env."
     exit 0
