@@ -60,11 +60,24 @@ def test_reads_checks_and_computes_age_and_ok():
     assert c.err.getvalue() == "", c.err.getvalue()
 
 
-def test_future_last_ok_is_age_zero_and_period_boundary_is_ok():
-    d = folder({"x.json": doc({"check": "a", "last_ok": NOW + 500, "period_s": 10},
-                              {"check": "b", "last_ok": NOW - 10, "period_s": 10})})
-    got = heartbeats.read_all(d, now=NOW)
-    assert [(g["age_s"], g["ok"]) for g in got] == [(0, 1), (10, 1)], got
+def test_future_last_ok_within_slack_is_age_zero_beyond_is_refused():
+    d = folder({"x.json": doc({"check": "a", "last_ok": NOW + 200, "period_s": 10},
+                              {"check": "b", "last_ok": NOW - 10, "period_s": 10},
+                              {"check": "far", "last_ok": NOW + 86400 * 365, "period_s": 10})})
+    with Capture() as c:
+        got = heartbeats.read_all(d, now=NOW)
+    assert [(g["check"], g["age_s"], g["ok"]) for g in got] == [("a", 0, 1), ("b", 10, 1)], got
+    assert "in the future" in c.err.getvalue() and "entry 3" in c.err.getvalue(), c.err.getvalue()
+
+
+def test_a_huge_integer_skips_only_its_entry():
+    d = folder({"a.json": '{"version": 1, "checks": [{"check": "huge", "last_ok": 1' + "0" * 400
+                          + ', "period_s": 60}, {"check": "fine", "last_ok": %d, "period_s": 60}]}' % NOW,
+                "b.json": doc({"check": "other", "last_ok": NOW, "period_s": 60})})
+    with Capture() as c:
+        got = heartbeats.read_all(d, now=NOW)
+    assert [g["check"] for g in got] == ["fine", "other"], got
+    assert "!!! Heartbeat entry skipped" in c.err.getvalue(), c.err.getvalue()
 
 
 def test_bad_files_are_skipped_without_echoing_their_text():

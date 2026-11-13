@@ -23,8 +23,10 @@ Each *.json file in HEARTBEATS_DIR looks like:
   ok        optional, default true: false says the job itself failed (a pull that didn't work)
 
 Limits: at most 64 files of at most 64 KiB, and 500 checks in all; anything that doesn't fit the
-shape above is reported (by file name and entry number, never its text) and skipped. A last_ok in
-the future counts as age 0. A check name that appears twice keeps the first.
+shape above is reported (by file name and entry number, never its text) and skipped. A last_ok more
+than FUTURE_SLACK_S ahead of this box's clock is refused (it would read as fresh forever); within
+that, it counts as age 0. A check name that appears twice keeps the first, so the folder must be
+writable only by the jobs that own it (Chonky: SYSTEM and Administrators).
 
 stdlib only.
 """
@@ -41,13 +43,17 @@ from . import config
 MAX_FILES = 64
 MAX_BYTES = 64 * 1024
 MAX_CHECKS = 500
+FUTURE_SLACK_S = 300
 _CHECK_RE = re.compile(r"[ -~]{1,120}")
 
 
 def _number(v):
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return None
-    f = float(v)
+    try:
+        f = float(v)
+    except OverflowError:      # an int too big for a float (JSON allows any length)
+        return None
     return f if math.isfinite(f) else None
 
 
@@ -103,6 +109,8 @@ def read_all(folder=None, now=None):
                     why = "check isn't 1-120 printable characters"
                 elif last is None or period is None or period <= 0:
                     why = "last_ok or period_s isn't a number (period_s > 0)"
+                elif last > now + FUTURE_SLACK_S:
+                    why = f"last_ok is more than {FUTURE_SLACK_S} s in the future"
                 elif not isinstance(ok, bool):
                     why = "ok isn't true or false"
                 elif check in seen:
