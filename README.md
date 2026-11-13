@@ -78,9 +78,14 @@ It fetches the tag with the box's deploy key, checks it out, then re-runs as the
 to tracked files (nothing is changed). `.env`, `venv/`, `secrets/` and `logs/` are git-ignored,
 so an update never touches them.
 
-**Every `vX.Y.Z` tag is code each box runs as root** at its next update (the checkout, then
-pip and the restart). Protect them: on GitHub, Settings → Rules → Rulesets → New tag ruleset,
-target `v*`, restrict creations, updates and deletions to the repo admin.
+**A `vX.Y.Z` tag is code each box runs as root** at its next update (the checkout, then pip
+and the restart), so two things guard it:
+
+- `update.sh` installs a tag only if its commit is on main (which takes only reviewed,
+  CI-green PRs). A tag off main is refused before anything is checked out, by the box's
+  current `update.sh`.
+- On GitHub, Settings → Rules → Rulesets, a tag ruleset on `v*` restricts creations,
+  updates and deletions to the repo admin.
 
 If an update stops after the checkout (pip or the restart failed), fix the cause and run
 `./update.sh` again: it records each finished update, so it finishes instead of saying
