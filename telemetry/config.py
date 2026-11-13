@@ -84,6 +84,7 @@ def _positive_float(name, default):
 
 
 PANE_TIMEOUT = _positive_float("PANE_TIMEOUT", 10.0)   # seconds, per socket operation
+SITES_TIMEOUT = _positive_float("SITES_TIMEOUT", 8.0)  # seconds, per socket operation, per site
 
 # ---------------------------------------------------------------------------
 # Identity
@@ -100,6 +101,20 @@ TELEMETRY_NVIDIA = _flag("TELEMETRY_NVIDIA", "1")   # run nvidia-smi collector
 TELEMETRY_LHM = _flag("TELEMETRY_LHM", "0")         # run LibreHardwareMonitor reader (Windows)
 LHM_GPUS = _flag("LHM_GPUS", "0")                   # include GPUs from LHM (Arc boxes)
 TELEMETRY_HOST = _flag("TELEMETRY_HOST", "0")       # run psutil host collector (Linux)
+TELEMETRY_SITES = _flag("TELEMETRY_SITES", "0")     # probe the public sites' health (pane only)
+
+# ---------------------------------------------------------------------------
+# Site probes (TELEMETRY_SITES=1): GET each URL in SITES_FILE every cycle and report whether it
+# answered, its status code, latency, the health JSON's status/db, and days until its TLS
+# certificate expires. The list ships in the repo (sites.txt), so it changes by PR and arrives
+# with the next release like any other change. SITES_CONTROL_URL is probed too: if it fails as
+# well, the problem is this box's internet, not the sites (alert rules use it to stay quiet).
+# ---------------------------------------------------------------------------
+SITES_FILE = (os.environ.get("SITES_FILE", "").strip()
+              or os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                              "sites.txt"))
+SITES_CONTROL_URL = os.environ.get("SITES_CONTROL_URL",
+                                   "https://www.google.com/generate_204").strip()
 
 # Platform flag: the Linux host collector (psutil/lm-sensors) only runs here.
 IS_LINUX = sys.platform.startswith("linux")

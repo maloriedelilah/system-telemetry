@@ -15,6 +15,11 @@ series <measurement>_<field>; the names below are fixed by Pane's fleet dashboar
   disk,disk=<name>               temp_c used_percent
   telemetry                      up=1 gpus=<n>    (heartbeat, every cycle)
 
+With TELEMETRY_SITES=1 (pane only), site_lines() adds the site probes:
+
+  site,site=<host>               reachable code latency_ms healthy db_ok cert_days
+  site_probe                     sites healthy control_ok
+
 Do not name a GPU field so that it matches .*gpu.*mem.*used.* other than
 mem_used_mb: the dashboard takes the max of everything matching, so a percent
 there would mix units. That is why the percentage is mem_pct.
@@ -154,6 +159,32 @@ def to_lines(gpus, models, host):
         ]))
 
     add(_line("telemetry", [], [("up", 1), ("gpus", len(gpus))]))
+    return lines
+
+
+def site_lines(results, control):
+    """Lines for sites.probe_all()'s (results, control). Absent values (db_ok with no "db" key,
+    cert_days on http, latency with no response) are left out, never sent as 0."""
+    lines = []
+    for r in results or []:
+        line = _line("site", [("site", r.get("site"))], [
+            ("reachable", r.get("reachable")),
+            ("code", r.get("code")),
+            ("latency_ms", r.get("latency_ms")),
+            ("healthy", r.get("healthy")),
+            ("db_ok", r.get("db_ok")),
+            ("cert_days", r.get("cert_days")),
+        ])
+        if line:
+            lines.append(line)
+    if results or control is not None:
+        line = _line("site_probe", [], [
+            ("sites", len(results or [])),
+            ("healthy", sum(int(r.get("healthy") or 0) for r in results or [])),
+            ("control_ok", None if control is None else control.get("reachable")),
+        ])
+        if line:
+            lines.append(line)
     return lines
 
 

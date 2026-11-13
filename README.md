@@ -123,10 +123,12 @@ telemetry/          the package
   lhm.py            LibreHardwareMonitor reader + host/GPU adapter
   mqtt.py           HA discovery + state publishing
   pane.py           Influx line protocol + push to Pane
+  sites.py          public-site health probes (pane only)
   __main__.py       orchestrator (python -m telemetry)
 install.sh          interactive installer (prompts -> .env, venv, service)
 update.sh           move to the newest release tag (deploy key) + deps + restart
 release.sh          maintainer: tag main vX.Y.Z and publish the release (one command)
+sites.txt           the public sites pane probes (TELEMETRY_SITES=1)
 .env.example        config schema reference (the installer writes the real .env)
 service/            systemd unit/timer + NSSM reference
 ```
@@ -224,10 +226,31 @@ timestamps and no host tag (Pane adds both). VictoriaMetrics names each series
 | `mem` | `used_gb total_gb used_percent` |
 | `disk,disk=<name>` | `temp_c used_percent` |
 | `telemetry` | `up=1 gpus=<n>` (heartbeat every cycle, even with no GPU) |
+| `site,site=<host>` | `reachable code latency_ms healthy db_ok cert_days` (TELEMETRY_SITES=1) |
+| `site_probe` | `sites healthy control_ok` (TELEMETRY_SITES=1) |
 
 Readings that are missing or not finite are left out. The GPU memory percentage is
 `mem_pct`, not `mem_used_*`, on purpose: the dashboard takes the max of every series
 matching `.*gpu.*mem.*used.*`, so only `gpu_mem_used_mb` may match.
+
+### Site probes (pane only)
+
+With `TELEMETRY_SITES=1`, each cycle also GETs every URL in `sites.txt` (in parallel,
+`SITES_TIMEOUT` seconds per socket operation, no redirects, no proxy) and sends one `site`
+line per site:
+
+- `reachable`: any HTTP answer came back (0 means DNS, refused, timeout or a bad certificate)
+- `code`, `latency_ms`, and `cert_days` (days until the TLS certificate expires)
+- `healthy`: for a `health` line (the default), 200 + a JSON object whose `status` is `ok`
+  (or `ok` is `true`) and whose `db`, if present, is `ok`; for an `up` line (a site with no
+  health endpoint yet), any 2xx
+- `db_ok`: from the `db` key, left out when there isn't one
+
+`SITES_CONTROL_URL` (default `https://www.google.com/generate_204`) is probed too, and
+reported as `site_probe control_ok`. When it is 0, pane has lost the internet and the sites
+may be fine: alert rules should hold their fire. An unhealthy site prints one line on stderr
+per cycle; it does not fail the cycle. To add or remove a site, change `sites.txt` in a PR.
+It reaches pane with the next release.
 
 ### Checking it is arriving
 
