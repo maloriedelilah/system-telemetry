@@ -11,6 +11,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from telemetry import config, pane, sites  # noqa: E402
 
+# The stub servers are http:// on 127.0.0.1, which the probes refuse in real use; the tests that
+# check that refusal turn this off again.
+sites._ALLOW_LOCAL_FOR_TESTS = True
+
 main = importlib.import_module("telemetry.__main__")   # importing it starts nothing
 
 TMP = tempfile.mkdtemp(prefix="sites-test-")
@@ -111,11 +115,10 @@ def cert(days=90):
 # ---------------------------------------------------------------------------
 # the sites file
 # ---------------------------------------------------------------------------
-def test_load_sites_parses_checks_comments_and_duplicates():
+def test_load_sites_parses_checks_and_comments():
     path = sites_file("# header\n\nhttps://a.example/api/health\n"
                       "https://b.example/  up   # no route yet\n"
-                      "  https://c.example/health   HEALTH\n"
-                      "https://a.example/api/health\n")
+                      "  https://c.example/health   HEALTH\n")
     with Capture() as c:
         got = sites.load_sites(path)
     assert got == [("https://a.example/api/health", "health"), ("https://b.example/", "up"),
@@ -123,16 +126,46 @@ def test_load_sites_parses_checks_comments_and_duplicates():
     assert c.err.getvalue() == "", c.err.getvalue()
 
 
-def test_load_sites_skips_bad_lines_with_a_report():
+def test_load_sites_skips_bad_lines_without_echoing_them():
     path = sites_file("ftp://x.example/\nnot a url\nhttps://ok.example/ maybe\n"
-                      "https://ok.example/ up extra\nhttps:///nohost\nhttps://good.example/\n")
+                      "https://ok.example/ up extra\nhttps:///nohost\n"
+                      "https://u:pw_SECRET@x.example/\nhttps://x.example:99999/\n"
+                      "https://good.example/\n")
     with Capture() as c:
         got = sites.load_sites(path)
     assert got == [("https://good.example/", "health")], got
     err = c.err.getvalue()
-    assert err.count("!!! Site list has a line it can't read (skipped)") == 5, err
-    for n in (1, 2, 3, 4, 5):
+    assert err.count("!!! Site list has a line it can't use (skipped)") == 7, err
+    for n in range(1, 8):
         assert f"line {n}" in err, err
+    # A line's text is never echoed (the file could be the wrong one, holding a secret).
+    assert "pw_SECRET" not in err and "nohost" not in err and "maybe" not in err, err
+
+
+def test_load_sites_refuses_a_repeated_label():
+    # /api/health and /health both label as the bare host, and a second identical URL repeats too:
+    # whichever came second would hide the first's state.
+    path = sites_file("https://a.example/api/health\nhttps://a.example/health\n"
+                      "https://a.example/api/health\nhttps://a.example:8443/api/health\n"
+                      "https://a.example/other\n")
+    with Capture() as c:
+        got = sites.load_sites(path)
+    assert got == [("https://a.example/api/health", "health"),
+                   ("https://a.example:8443/api/health", "health"),
+                   ("https://a.example/other", "health")], got
+    err = c.err.getvalue()
+    assert err.count("repeats an earlier line") == 2 and "line 2" in err and "line 3" in err, err
+
+
+def test_load_sites_refuses_http_in_real_use():
+    sites._ALLOW_LOCAL_FOR_TESTS = False
+    try:
+        with Capture() as c:
+            got = sites.load_sites(sites_file("http://a.example/api/health\nhttps://b.example/\n"))
+        assert got == [("https://b.example/", "health")], got
+        assert "not an https URL" in c.err.getvalue(), c.err.getvalue()
+    finally:
+        sites._ALLOW_LOCAL_FOR_TESTS = True
 
 
 def test_load_sites_unreadable_file_reports_and_returns_empty():
@@ -142,19 +175,26 @@ def test_load_sites_unreadable_file_reports_and_returns_empty():
 
 
 def test_repo_sites_file_is_valid_and_all_https():
-    with Capture() as c:
-        got = sites.load_sites(os.path.join(ROOT, "sites.txt"))
+    sites._ALLOW_LOCAL_FOR_TESTS = False
+    try:
+        with Capture() as c:
+            got = sites.load_sites(os.path.join(ROOT, "sites.txt"))
+    finally:
+        sites._ALLOW_LOCAL_FOR_TESTS = True
     assert c.err.getvalue() == "", c.err.getvalue()
     assert len(got) >= 10, got
     assert all(u.startswith("https://") for u, _ in got), got
-    names = sites.site_names([u for u, _ in got])
-    assert len(set(names)) == len(names), names
 
 
-def test_site_names_add_path_only_when_hosts_repeat():
-    assert sites.site_names(["https://a.x/api/health", "https://b.x/health",
-                             "https://a.x/other", "https://c.x"]) == \
-        ["a.x/api/health", "b.x", "a.x/other", "c.x"]
+def test_site_name():
+    n = sites.site_name
+    assert n("https://a.x/api/health") == "a.x"
+    assert n("https://a.x/health") == "a.x"
+    assert n("https://a.x/") == "a.x" and n("https://a.x") == "a.x"
+    assert n("https://a.x:443/api/health") == "a.x"
+    assert n("https://a.x:8443/api/health") == "a.x:8443"
+    assert n("https://a.x/status") == "a.x/status"
+    assert n("https://a.x/api/health?deep=1") == "a.x/api/health?deep=1"
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +327,8 @@ def test_https_untrusted_certificate_is_unreachable():
     try:
         r = sites.probe(s.base + "/api/health", timeout=3)       # the default (system) trust
         assert (r["reachable"], r["healthy"], r["code"]) == (0, 0, 0), r
-        assert "SSL" in r["error"] or "certificate" in r["error"].lower(), r
+        # The verify message says which failure it is (self-signed, expired, wrong host ...).
+        assert r["error"].startswith("SSLCertVerificationError: self-signed certificate"), r
     finally:
         s.stop()
 
@@ -303,6 +344,94 @@ def test_https_trusted_certificate_reports_cert_days():
         s.stop()
 
 
+def test_refuses_http_and_non_public_addresses_in_real_use():
+    s = Site({"/api/health": J('{"status":"ok"}')})
+    sites._ALLOW_LOCAL_FOR_TESTS = False
+    try:
+        r = sites.probe(s.base + "/api/health", timeout=2)
+        assert (r["reachable"], r["error"]) == (0, "_Refused: not an https URL"), r
+        for url in ("https://127.0.0.1:1/api/health", "https://localhost:1/api/health",
+                    "https://10.0.0.1/api/health", "https://192.168.68.1/", "https://169.254.169.254/",
+                    "https://100.92.61.42:8427/", "https://[::1]:1/"):
+            r = sites.probe(url, timeout=2)
+            assert r["reachable"] == 0 and "resolves only to non-public addresses" in r["error"], (url, r)
+        assert s.requests == [], s.requests                # nothing reached the stub
+    finally:
+        sites._ALLOW_LOCAL_FOR_TESTS = True
+        s.stop()
+
+
+def test_server_control_characters_never_reach_the_log():
+    def bad_status(h):
+        h.wfile.write(b"HTTP/1.1 2\x1b[31m00 OK\r\n\r\n")
+    s = Site({"/api/health": bad_status, "/j": J('{"status":"\\u001b[2Jdown"}')})
+    try:
+        for path in ("/api/health", "/j"):
+            r = sites.probe(s.base + path, timeout=3)
+            assert r["healthy"] == 0 and r["error"], r
+            assert not any(ord(ch) < 32 or ord(ch) == 127 for ch in r["error"]), repr(r["error"])
+    finally:
+        s.stop()
+
+
+def test_a_trickling_site_cannot_hold_up_the_round():
+    def trickle(h):
+        h.wfile.write(b"HTTP/1.1 200 OK\r\n")
+        h.wfile.flush()
+        try:
+            for _ in range(100):                 # a header byte every 0.2 s: each read succeeds
+                time.sleep(0.2)
+                h.wfile.write(b"X")
+                h.wfile.flush()
+        except OSError:
+            pass
+    s = Site({"/slow": trickle, "/api/health": J('{"status":"ok"}')})
+    old = config.SITES_CONTROL_URL
+    try:
+        config.SITES_CONTROL_URL = ""
+        t0 = time.monotonic()
+        with Capture():
+            results, _ = sites.probe_all([(s.base + "/slow", "health"),
+                                          (s.base + "/api/health", "health")],
+                                         timeout=2, deadline=1.5)
+        took = time.monotonic() - t0
+        assert took < 2.5, took                             # per-socket timeouts alone never end
+        slow, ok = results
+        assert (slow["reachable"], slow["healthy"]) == (0, 0), slow
+        assert slow["error"] == "no answer within SITES_DEADLINE (1.5 s)", slow
+        assert slow["site"] == sites.site_name(s.base + "/slow") and slow["check"] == "health", slow
+        assert ok["healthy"] == 1, ok                       # the healthy site isn't stuck behind it
+    finally:
+        config.SITES_CONTROL_URL = old
+        s.stop()
+
+
+def test_a_stuck_probe_does_not_keep_the_process_alive():
+    # The service is a oneshot: after the deadline, the abandoned probe must not hold up exit.
+    def trickle(h):
+        h.wfile.write(b"HTTP/1.1 200 OK\r\n")
+        try:
+            for _ in range(150):
+                time.sleep(0.2)
+                h.wfile.write(b"X")
+                h.wfile.flush()
+        except OSError:
+            pass
+    s = Site({"/slow": trickle})
+    code = ("import sys; sys.path.insert(0, %r); from telemetry import config, sites; "
+            "sites._ALLOW_LOCAL_FOR_TESTS = True; config.SITES_CONTROL_URL = ''; "
+            "r, _ = sites.probe_all([(%r, 'health')], timeout=5, deadline=1); "
+            "print(r[0]['error'])") % (ROOT, s.base + "/slow")
+    try:
+        t0 = time.monotonic()
+        out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
+        took = time.monotonic() - t0
+        assert "no answer within SITES_DEADLINE (1 s)" in out.stdout, (out.stdout, out.stderr)
+        assert took < 6, took                     # not the trickle's 30 s
+    finally:
+        s.stop()
+
+
 def test_probe_all_order_names_control_and_reports():
     s = Site({"/api/health": J('{"status":"ok"}'), "/down": J('{"status":"down"}'),
               "/204": (204, b"", "text/plain")})
@@ -312,12 +441,14 @@ def test_probe_all_order_names_control_and_reports():
         with Capture() as c:
             results, control = sites.probe_all(
                 [(s.base + "/api/health", "health"), (s.base + "/down", "health")], timeout=3)
-        assert [r["site"] for r in results] == ["localhost/api/health", "localhost/down"], results
+        host = s.base.split("//", 1)[1]
+        assert [r["site"] for r in results] == [host, f"{host}/down"], results
+        assert [r["check"] for r in results] == ["health", "health"], results
         assert [r["healthy"] for r in results] == [1, 0], results
         assert control["reachable"] == 1 and control["code"] == 204, control
         err = c.err.getvalue()
-        assert "site localhost/down: NOT healthy (status is 'down', not 'ok')" in err, err
-        assert "localhost/api/health" not in err, err
+        assert f"site {host}/down: NOT healthy (status is 'down', not 'ok')" in err, err
+        assert f"site {host}:" not in err, err
 
         config.SITES_CONTROL_URL = f"http://127.0.0.1:{free_port()}/"
         with Capture() as c:
@@ -361,27 +492,28 @@ def test_probe_all_runs_in_parallel():
 # ---------------------------------------------------------------------------
 def test_site_lines_exact():
     results = [
-        {"site": "write.authortools.net", "reachable": 1, "code": 200, "latency_ms": 41.5,
-         "healthy": 1, "db_ok": 1, "cert_days": 63.25, "error": ""},
-        {"site": "lens.authortools.net", "reachable": 1, "code": 200, "latency_ms": 30.0,
-         "healthy": 1, "db_ok": None, "cert_days": 20.0, "error": ""},
-        {"site": "gone.example", "reachable": 0, "code": 0, "latency_ms": None,
+        {"site": "write.authortools.net", "check": "health", "reachable": 1, "code": 200,
+         "latency_ms": 41.5, "healthy": 1, "db_ok": 1, "cert_days": 63.25, "error": ""},
+        {"site": "lens.authortools.net", "check": "up", "reachable": 1, "code": 200,
+         "latency_ms": 30.0, "healthy": 1, "db_ok": None, "cert_days": 20.0, "error": ""},
+        {"site": "gone.example", "check": "health", "reachable": 0, "code": 0, "latency_ms": None,
          "healthy": 0, "db_ok": None, "cert_days": None, "error": "gaierror: x"},
     ]
     control = {"reachable": 1, "code": 204}
     assert pane.site_lines(results, control) == [
-        "site,site=write.authortools.net reachable=1,code=200,latency_ms=41.5,healthy=1,"
-        "db_ok=1,cert_days=63.25",
-        "site,site=lens.authortools.net reachable=1,code=200,latency_ms=30,healthy=1,cert_days=20",
-        "site,site=gone.example reachable=0,code=0,healthy=0",
+        "site,site=write.authortools.net,check=health reachable=1,code=200,latency_ms=41.5,"
+        "healthy=1,db_ok=1,cert_days=63.25",
+        "site,site=lens.authortools.net,check=up reachable=1,code=200,latency_ms=30,healthy=1,"
+        "cert_days=20",
+        "site,site=gone.example,check=health reachable=0,code=0,healthy=0",
         "site_probe sites=3,healthy=2,control_ok=1",
     ], pane.site_lines(results, control)
     assert pane.site_lines(results[:1], None)[-1] == "site_probe sites=1,healthy=1"
     assert pane.site_lines([], None) == []
     assert pane.site_lines([], {"reachable": 0}) == ["site_probe sites=0,healthy=0,control_ok=0"]
     # Tag escaping goes through the same code as everything else.
-    odd = [{"site": "a b,c=d", "reachable": 1, "code": 200, "healthy": 1}]
-    assert pane.site_lines(odd, None)[0].startswith("site,site=a\\ b\\,c\\=d "), odd
+    odd = [{"site": "a b,c=d", "check": "up", "reachable": 1, "code": 200, "healthy": 1}]
+    assert pane.site_lines(odd, None)[0].startswith("site,site=a\\ b\\,c\\=d,check=up "), odd
 
 
 # ---------------------------------------------------------------------------
@@ -440,7 +572,7 @@ def test_run_once_pushes_site_lines_with_host_lines():
             assert main.run_once() is True
         body = p.bodies[-1]
         assert "mem used_gb=1,total_gb=2,used_percent=50\n" in body, body
-        assert "site,site=localhost reachable=1,code=200," in body, body
+        assert f"site,site={s.base.split('//', 1)[1]},check=health reachable=1,code=200," in body, body
         assert "site_probe sites=1,healthy=1,control_ok=1\n" in body, body
     finally:
         config.SITES_CONTROL_URL = old_ctl
@@ -458,7 +590,7 @@ def test_run_once_sites_only_still_publishes():
         config.SITES_CONTROL_URL = ""
         with Capture():
             assert main.run_once() is True
-        assert "site,site=localhost " in p.bodies[-1], p.bodies
+        assert f"site,site={s.base.split('//', 1)[1]},check=health " in p.bodies[-1], p.bodies
     finally:
         config.SITES_CONTROL_URL = old_ctl
         config.TELEMETRY_SITES = False
@@ -519,20 +651,49 @@ def test_run_once_sites_off_probes_nothing():
         p.stop()
 
 
-def test_config_defaults():
+def test_run_once_refuses_site_probes_in_loop_mode():
+    p = FakePane()
+    called = []
+    real, old_loop = main.sites.probe_all, config.LOOP_INTERVAL
+    try:
+        _cycle_config(p.url, sites_file(""), host={"ram": {"used_gb": 1.0, "total_gb": 2.0,
+                                                           "pct": 50.0}})
+        config.LOOP_INTERVAL = "30"
+        main.sites.probe_all = lambda *a, **k: called.append(1) or ([], None)
+        with Capture() as c:
+            assert main.run_once() is True               # host data still goes out
+        assert called == [], called
+        assert "!!! Site probes are off in loop mode" in c.err.getvalue(), c.err.getvalue()
+    finally:
+        main.sites.probe_all, config.LOOP_INTERVAL = real, old_loop
+        config.TELEMETRY_SITES = False
+        p.stop()
+
+
+def test_unit_has_a_start_timeout():
+    with open(os.path.join(ROOT, "service", "telemetry.service")) as f:
+        unit = f.read()
+    assert "\nType=oneshot\n" in unit and "\nTimeoutStartSec=60\n" in unit, unit
+
+
+def test_config_defaults_and_no_env_override_of_the_list():
     code = ("import telemetry.config as c;"
-            "print(c.TELEMETRY_SITES, c.SITES_FILE, c.SITES_CONTROL_URL, c.SITES_TIMEOUT)")
+            "print(c.TELEMETRY_SITES, c.SITES_FILE, c.SITES_CONTROL_URL, c.SITES_TIMEOUT, "
+            "c.SITES_DEADLINE)")
     env = {k: v for k, v in os.environ.items() if not k.startswith(("SITES_", "TELEMETRY_"))}
     out = subprocess.check_output([sys.executable, "-c", code], env=env, cwd=ROOT, text=True)
-    flag, path, ctl, timeout = out.split()
-    assert flag == "False" and timeout == "8.0", out
+    flag, path, ctl, timeout, deadline = out.split()
+    assert (flag, timeout, deadline) == ("False", "8.0", "15.0"), out
     assert os.path.samefile(path, os.path.join(ROOT, "sites.txt")), out
     assert ctl == "https://www.google.com/generate_204", out
-    env.update(TELEMETRY_SITES="1", SITES_FILE="/tmp/x.txt", SITES_CONTROL_URL="",
-               SITES_TIMEOUT="2")
-    out = subprocess.check_output([sys.executable, "-c", code.replace(
-        "c.SITES_CONTROL_URL", "repr(c.SITES_CONTROL_URL)")], env=env, cwd=ROOT, text=True)
-    assert out.split() == ["True", "/tmp/x.txt", "''", "2.0"], out
+    # The service user owns .env: it can tune the timings, never the list or the control URL.
+    env.update(TELEMETRY_SITES="1", SITES_FILE="/opt/telemetry/secrets/pane_token",
+               SITES_CONTROL_URL="https://10.0.0.1/", SITES_TIMEOUT="2", SITES_DEADLINE="9")
+    out = subprocess.check_output([sys.executable, "-c", code], env=env, cwd=ROOT, text=True)
+    flag, path, ctl, timeout, deadline = out.split()
+    assert (flag, timeout, deadline) == ("True", "2.0", "9.0"), out
+    assert os.path.samefile(path, os.path.join(ROOT, "sites.txt")), out
+    assert ctl == "https://www.google.com/generate_204", out
 
 
 if __name__ == "__main__":

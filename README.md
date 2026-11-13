@@ -226,7 +226,7 @@ timestamps and no host tag (Pane adds both). VictoriaMetrics names each series
 | `mem` | `used_gb total_gb used_percent` |
 | `disk,disk=<name>` | `temp_c used_percent` |
 | `telemetry` | `up=1 gpus=<n>` (heartbeat every cycle, even with no GPU) |
-| `site,site=<host>` | `reachable code latency_ms healthy db_ok cert_days` (TELEMETRY_SITES=1) |
+| `site,site=<label>,check=<health\|up>` | `reachable code latency_ms healthy db_ok cert_days` (TELEMETRY_SITES=1) |
 | `site_probe` | `sites healthy control_ok` (TELEMETRY_SITES=1) |
 
 Readings that are missing or not finite are left out. The GPU memory percentage is
@@ -235,22 +235,31 @@ matching `.*gpu.*mem.*used.*`, so only `gpu_mem_used_mb` may match.
 
 ### Site probes (pane only)
 
-With `TELEMETRY_SITES=1`, each cycle also GETs every URL in `sites.txt` (in parallel,
-`SITES_TIMEOUT` seconds per socket operation, no redirects, no proxy) and sends one `site`
-line per site:
+With `TELEMETRY_SITES=1`, each 30 s cycle also GETs every URL in `sites.txt`, in parallel, and
+sends one `site,site=<label>,check=<health|up>` line per site:
 
 - `reachable`: any HTTP answer came back (0 means DNS, refused, timeout or a bad certificate)
 - `code`, `latency_ms`, and `cert_days` (days until the TLS certificate expires)
 - `healthy`: for a `health` line (the default), 200 + a JSON object whose `status` is `ok`
   (or `ok` is `true`) and whose `db`, if present, is `ok`; for an `up` line (a site with no
-  health endpoint yet), any 2xx
+  health endpoint yet), any 2xx. The `check` tag tells the two apart on a dashboard.
 - `db_ok`: from the `db` key, left out when there isn't one
 
-`SITES_CONTROL_URL` (default `https://www.google.com/generate_204`) is probed too, and
-reported as `site_probe control_ok`. When it is 0, pane has lost the internet and the sites
-may be fine: alert rules should hold their fire. An unhealthy site prints one line on stderr
-per cycle; it does not fail the cycle. To add or remove a site, change `sites.txt` in a PR.
-It reaches pane with the next release.
+The limits:
+- **Where it can go:** https only, to public addresses only. Names are resolved first, and
+  private, loopback, link-local and tailnet addresses are never connected to.
+- **What it does on arrival:** no redirects, no proxy, at most 64 KiB read.
+- **How long it can take:** `SITES_TIMEOUT` (8 s) bounds each socket operation, and
+  `SITES_DEADLINE` (15 s) bounds the whole round. A probe still going at the deadline is
+  reported as a timeout and abandoned. That needs the oneshot timer, so the probes refuse to run
+  in loop mode. The unit also has `TimeoutStartSec=60`.
+- **Where the list lives:** the list and the control URL (`https://www.google.com/generate_204`)
+  are fixed in the repo, not settable from `.env`. To add or remove a site, change `sites.txt`
+  in a PR; it reaches pane with the next release. Two lines with the same label are refused.
+
+When the control URL fails too (`site_probe control_ok` 0), pane has lost the internet and
+the sites may be fine, so alert rules should hold their fire. An unhealthy site prints one line
+on stderr per cycle; it does not fail the cycle.
 
 ### Checking it is arriving
 

@@ -1,5 +1,5 @@
 # Public sites Pane probes (TELEMETRY_SITES=1, on pane only). '#' starts a comment.
-# Each line: URL [health|up]
+# Each line: https URL [health|up] (public addresses only; one line per site label)
 #   health (default)  a health endpoint: 200 + a JSON object whose "status" is "ok" (or "ok" is
 #                     true), and whose "db", if present, is "ok"
 #   up                no health endpoint yet: any 2xx from the page counts
@@ -17,7 +17,7 @@ https://corpus.authortools.net/api/health
 https://lens.authortools.net/  up              # no health route yet (SPA answers every path)
 https://bookmockups.authortools.net/  up       # no health route yet
 https://metaapi.authortools.net/api/health
-https://amazonapi.authortools.net/api/health
+https://amazonapi.authortools.net/healthz  up       # answers plain "ok", not JSON
 https://help.authortools.net/  up              # no health route yet
 
 # soyarma.net

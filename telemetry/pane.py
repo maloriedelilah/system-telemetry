@@ -17,7 +17,7 @@ series <measurement>_<field>; the names below are fixed by Pane's fleet dashboar
 
 With TELEMETRY_SITES=1 (pane only), site_lines() adds the site probes:
 
-  site,site=<host>               reachable code latency_ms healthy db_ok cert_days
+  site,site=<host>,check=<health|up>  reachable code latency_ms healthy db_ok cert_days
   site_probe                     sites healthy control_ok
 
 Do not name a GPU field so that it matches .*gpu.*mem.*used.* other than
@@ -167,7 +167,7 @@ def site_lines(results, control):
     cert_days on http, latency with no response) are left out, never sent as 0."""
     lines = []
     for r in results or []:
-        line = _line("site", [("site", r.get("site"))], [
+        line = _line("site", [("site", r.get("site")), ("check", r.get("check"))], [
             ("reachable", r.get("reachable")),
             ("code", r.get("code")),
             ("latency_ms", r.get("latency_ms")),

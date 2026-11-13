@@ -53,7 +53,14 @@ def run_once():
     # Site probes go to Pane only (Home Assistant has no use for them). A probe never raises,
     # but a bug here must not cost the host and GPU data, so it is fenced off like an output.
     site_results, site_control = [], None
-    if config.TELEMETRY_SITES:
+    if config.TELEMETRY_SITES and config.LOOP_INTERVAL:
+        # A probe stuck past its deadline is abandoned in a daemon thread, which only ends when
+        # the process does: fine for the oneshot timer, a slow leak in loop mode (Errata, OPS-59).
+        config.report("Site probes are off in loop mode", "read TELEMETRY_SITES and LOOP_INTERVAL",
+                      "TELEMETRY_SITES=1 only with the systemd timer (LOOP_INTERVAL empty)",
+                      f"LOOP_INTERVAL={config.LOOP_INTERVAL}",
+                      "run them on a Linux box with the timer (pane), or set TELEMETRY_SITES=0")
+    elif config.TELEMETRY_SITES:
         try:
             site_results, site_control = sites.probe_all()
         except Exception as e:
