@@ -89,9 +89,11 @@ PANE_TIMEOUT = _positive_float("PANE_TIMEOUT", 10.0)   # seconds, per socket ope
 # Identity
 # ---------------------------------------------------------------------------
 # Friendly host name used in entity names/ids. Defaults to the actual hostname.
-HOST = os.environ.get("TELEMETRY_HOST_NAME",
-                      os.environ.get("GPU_HOST_NAME",
-                                     socket.gethostname())).lower()
+# An empty TELEMETRY_HOST_NAME= (install.sh writes one when the name is left blank) means the
+# OS hostname, the same as unset.
+HOST = ((os.environ.get("TELEMETRY_HOST_NAME") or "").strip()
+        or (os.environ.get("GPU_HOST_NAME") or "").strip()
+        or socket.gethostname()).lower()
 
 # ---------------------------------------------------------------------------
 # Roles — explicit per machine (replaces inferring LHM from LHM_URL presence)

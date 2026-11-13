@@ -29,7 +29,13 @@ report() {
     printf '\n\033[1;31m!!! %s\033[0m\n    Did:      %s\n    Expected: %s\n    Got:      %s\n    Next:     %s So far: %s.\n' \
         "$1" "$2" "$3" "$4" "$5" "$SO_FAR" >&2
 }
-trap 'report "release.sh stopped" "line $LINENO" "it to succeed" "exit $?" "read the error above and run it again."' ERR
+# Only the main shell reports: set -E carries the trap into $( ) subshells, which printed it twice.
+on_err() {
+    local rc=$?
+    [[ $BASHPID == "$$" ]] || return 0
+    report "release.sh stopped" "line $1" "it to succeed" "exit $rc" "read the error above and run it again."
+}
+trap 'on_err $LINENO' ERR
 
 if ! command -v gh >/dev/null; then
     report "gh not found" "command -v gh" "the GitHub CLI installed" "not on PATH" "install it, run gh auth login, then ./release.sh again."
@@ -49,7 +55,7 @@ if ! tags="$(gh api --paginate "repos/$SLUG/git/matching-refs/tags/v" --jq '.[].
     exit 1
 fi
 # Exactly refs/tags/vX.Y.Z with no leading zeros, as update.sh picks them.
-newest="$(printf '%s\n' "$tags" | awk '$1 ~ /^refs\/tags\/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/ { sub(/^refs\/tags\//, "", $1); print $1 }' | sort -V | tail -n 1)"
+newest="$(printf '%s\n' "$tags" | awk '$1 ~ /^refs\/tags\/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/ { sub(/^refs\/tags\//, "", $1); print $1 }' | awk '{ split(substr($0, 2), p, "."); k = sprintf("%012d%012d%012d", p[1], p[2], p[3]); if (k > best) { best = k; t = $0 } } END { if (t != "") print t }')"
 
 if [[ -n "$newest" ]]; then
     # The commit the newest tag names: GitHub peels an annotated tag to its commit here.
@@ -80,7 +86,7 @@ case "$arg" in
         ;;
 esac
 TAG="v$MA.$MI.$PA"
-if [[ "$(printf '%s\n%s\n' "$newest" "$TAG" | sort -V | tail -n 1)" != "$TAG" || "$TAG" == "$newest" ]]; then
+if [[ "$(printf '%s\n%s\n' "$newest" "$TAG" | awk '{ split(substr($0, 2), p, "."); k = sprintf("%012d%012d%012d", p[1], p[2], p[3]); if (k > best) { best = k; t = $0 } } END { if (t != "") print t }')" != "$TAG" || "$TAG" == "$newest" ]]; then
     report "not newer than $newest" "compare $TAG with the newest release" "a version after $newest" "$TAG" \
         "pick a newer version: boxes take the newest tag, so an older one would never be used."
     exit 1

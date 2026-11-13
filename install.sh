@@ -7,6 +7,19 @@
 #     ./install.sh             # first run: prompts and writes .env
 #     ./install.sh --reconfigure   # re-prompt and overwrite .env
 #
+# Fleet mode (Linux, no questions; pane's telemetry-install.sh uses it, OPS-47):
+#
+#     sudo ./install.sh --profile host|gpu|vm --pane-url http://<pane>:8427 \
+#         [--models llamaserver=URL[,URL] | --models ollama=URL] [--run-user telemetry] [--token-stdin]
+#
+#   host  CPU/RAM/disk (psutil + hwmon)       gpu  host + NVIDIA       vm  host, for VMs (no sensors)
+#   MQTT is off in every profile (fleet boxes report to Pane only). The profile always
+#   rewrites .env, so rerunning the same command puts a box that drifted back on the standard.
+#   --run-user   the account the service runs as (created as a system user if missing);
+#                default: the account that ran sudo.
+#   --token-stdin  read this box's Pane token (from pane's add-box.sh) on stdin and save it
+#                  to secrets/pane_token, 0400, owned by the run user.
+#
 # First run with no .env: prompts for MQTT, roles, and model source, writes
 # .env, builds the venv, and registers the service. Re-running with an existing
 # .env keeps your config and just (re)builds the venv + service.
@@ -22,11 +35,32 @@ INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TTY_R="${TELEMETRY_TTY_R:-/dev/tty}"      # terminal for reading answers (overridable for tests)
 TTY_W="${TELEMETRY_TTY_W:-/dev/tty}"      # terminal for writing prompts
 RECONFIGURE=0
-[[ "${1:-}" == "--reconfigure" ]] && RECONFIGURE=1
+PROFILE="" PANE_URL_ARG="" MODELS_ARG="" RUN_USER_ARG="" TOKEN_STDIN=0
+ORIG_ARGS=("$@")
 
 say()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m  %s\n' "$*" >&2; }
 die()  { printf '\033[1;31mxx\033[0m  %s\n' "$*" >&2; exit 1; }
+# The house error format, for fleet mode: what was tried, expected, got, what to do next.
+report() {
+    printf '\n\033[1;31m!!! %s\033[0m\n    Did:      %s\n    Expected: %s\n    Got:      %s\n    Next:     %s\n' \
+        "$1" "$2" "$3" "$4" "$5" >&2
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --reconfigure) RECONFIGURE=1; shift ;;
+        --profile)     PROFILE="${2:-}"; shift 2 || shift ;;
+        --pane-url)    PANE_URL_ARG="${2:-}"; shift 2 || shift ;;
+        --models)      MODELS_ARG="${2:-}"; shift 2 || shift ;;
+        --run-user)    RUN_USER_ARG="${2:-}"; shift 2 || shift ;;
+        --token-stdin) TOKEN_STDIN=1; shift ;;
+        *) report "unknown argument" "read the command line" \
+               "--reconfigure, or --profile host|gpu|vm --pane-url URL [--models ...] [--run-user NAME] [--token-stdin]" \
+               "'$1'" "check the command (the header of install.sh lists the options). Nothing was changed."
+           exit 2 ;;
+    esac
+done
 
 case "$(uname -s)" in
     Linux*)               OS=linux ;;
@@ -40,7 +74,8 @@ esac
 # ---------------------------------------------------------------------------
 if [[ "$OS" == linux && "$INSTALL_DIR" == /opt/* && "$(id -u)" -ne 0 ]]; then
     say "Re-executing under sudo for /opt + systemd…"
-    exec sudo -E bash "$INSTALL_DIR/install.sh" "$@" </dev/tty
+    if [[ -n "$PROFILE" ]]; then exec sudo -E bash "$INSTALL_DIR/install.sh" "${ORIG_ARGS[@]}"; fi
+    exec sudo -E bash "$INSTALL_DIR/install.sh" "${ORIG_ARGS[@]}" </dev/tty
 fi
 
 # ---------------------------------------------------------------------------
@@ -192,9 +227,102 @@ ENV
 }
 
 # ---------------------------------------------------------------------------
+# Fleet mode: validate the arguments before anything changes.
+# ---------------------------------------------------------------------------
+MODEL_SOURCE_F=none MODEL_URL_F="http://127.0.0.1:11434" MODEL_PATH_F="/api/v0/models"
+if [[ -n "$PROFILE" ]]; then
+    if [[ "$OS" != linux ]]; then
+        report "fleet mode is Linux-only" "read --profile" "a Linux box" "$OS" \
+            "on Windows, run ./install.sh with no options and answer the questions. Nothing was changed."
+        exit 2
+    fi
+    case "$PROFILE" in host|gpu|vm) ;; *)
+        report "unknown profile" "read --profile" "host, gpu or vm" "'$PROFILE'" "pick one of the three. Nothing was changed."
+        exit 2 ;;
+    esac
+    # Same rule as telemetry/pane.py: scheme and host[:port] only. No userinfo (a token there
+    # would end up in logs), no path, query or fragment.
+    if [[ ! "$PANE_URL_ARG" =~ ^https?://[A-Za-z0-9.:-]+$ ]]; then
+        report "not a Pane URL" "read --pane-url" "http://<pane's tailnet address>:8427 (no user@, no path)" \
+            "'${PANE_URL_ARG:0:60}'" "copy the URL add-box.sh printed on pane. Nothing was changed."
+        exit 2
+    fi
+    if [[ -n "$MODELS_ARG" ]]; then
+        case "$MODELS_ARG" in
+            llamaserver=*) MODEL_SOURCE_F=llamaserver; MODEL_URL_F="${MODELS_ARG#llamaserver=}" ;;
+            ollama=*)      MODEL_SOURCE_F=ollama; MODEL_URL_F="${MODELS_ARG#ollama=}"; MODEL_PATH_F="/api/ps" ;;
+            *) report "unknown --models" "read --models" "llamaserver=URL[,URL] or ollama=URL" "'$MODELS_ARG'" \
+                   "fix the option. Nothing was changed."
+               exit 2 ;;
+        esac
+        if [[ ! "$MODEL_URL_F" =~ ^https?://[A-Za-z0-9.:-]+(,https?://[A-Za-z0-9.:-]+)*$ ]]; then
+            report "bad model URL" "read --models" "http://host:port (comma-separated for several)" "'$MODEL_URL_F'" \
+                "fix the option. Nothing was changed."
+            exit 2
+        fi
+    fi
+    if [[ -n "$RUN_USER_ARG" && ! "$RUN_USER_ARG" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]]; then
+        report "bad --run-user" "read --run-user" "a Linux user name, e.g. telemetry" "'$RUN_USER_ARG'" \
+            "fix the option. Nothing was changed."
+        exit 2
+    fi
+fi
+
+# The token, read now (before anything changes) so a bad paste stops the run cleanly.
+TOKEN=""
+if [[ "$TOKEN_STDIN" -eq 1 ]]; then
+    IFS= read -r TOKEN || true
+    TOKEN="${TOKEN%$'\r'}"
+    if [[ ! "$TOKEN" =~ ^[!-~]{20,512}$ ]]; then
+        report "that isn't a Pane token" "read the token on stdin" \
+            "one line of printable characters with no spaces (pane's add-box.sh prints it)" \
+            "${#TOKEN} character(s) that don't fit" "paste the token add-box.sh printed, on its own. Nothing was changed."
+        exit 2
+    fi
+fi
+
+write_env_profile() {
+    local nvidia=0
+    [[ "$PROFILE" == gpu ]] && nvidia=1
+    umask 077
+    cat > "$INSTALL_DIR/.env" <<ENV
+# system-telemetry config: written by install.sh --profile $PROFILE (fleet mode). Rerun the same
+# command to restore it; hand edits are overwritten. Never commit this file.
+MQTT_HOST=
+MQTT_PORT=1883
+MQTT_USER=
+MQTT_PASS=
+MQTT_DISCOVERY_PREFIX=homeassistant
+
+# Pane. The token is NOT here: it lives in secrets/pane_token (PANE_TOKEN_FILE).
+PANE_URL=$PANE_URL_ARG
+
+TELEMETRY_HOST_NAME=
+
+TELEMETRY_NVIDIA=$nvidia
+TELEMETRY_LHM=0
+LHM_GPUS=0
+LHM_URL=http://localhost:8085/data.json
+LHM_GPU_INCLUDE=
+TELEMETRY_HOST=1
+
+MODEL_SOURCE=$MODEL_SOURCE_F
+MODEL_API_URL=$MODEL_URL_F
+MODEL_API_PATH=$MODEL_PATH_F
+MODEL_FILTER=
+
+LOOP_INTERVAL=
+DEBUG=0
+ENV
+    say "Wrote $INSTALL_DIR/.env (profile $PROFILE)"
+}
+
+# ---------------------------------------------------------------------------
 # .env: prompt on first run or --reconfigure; otherwise keep existing.
 # ---------------------------------------------------------------------------
-if [[ ! -f "$INSTALL_DIR/.env" || "$RECONFIGURE" -eq 1 ]]; then
+if [[ -n "$PROFILE" ]]; then
+    write_env_profile
+elif [[ ! -f "$INSTALL_DIR/.env" || "$RECONFIGURE" -eq 1 ]]; then
     write_env
 else
     say "Existing .env found — keeping it (run ./install.sh --reconfigure to change)."
@@ -211,8 +339,47 @@ fi
 # LINUX — venv + systemd
 # ===========================================================================
 if [[ "$OS" == linux ]]; then
-    RUN_USER="${SUDO_USER:-$USER}"
-    command -v python3 >/dev/null || die "python3 not found."
+    RUN_USER="${RUN_USER_ARG:-${SUDO_USER:-$USER}}"
+    if [[ -n "$RUN_USER_ARG" ]] && ! id -u "$RUN_USER" >/dev/null 2>&1; then
+        say "Creating system user '$RUN_USER' for the service…"
+        useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "$RUN_USER"
+    fi
+
+    if [[ "${TELEMETRY_SKIP_SERVICE:-0}" == 1 ]]; then
+        # Tests: .env and the token only; no venv, no systemd.
+        mkdir -p "$INSTALL_DIR/secrets"
+        chown "$RUN_USER" "$INSTALL_DIR/secrets" "$INSTALL_DIR/.env" 2>/dev/null || true
+        chmod 0700 "$INSTALL_DIR/secrets"
+        if [[ -n "$TOKEN" ]]; then
+            rm -f "$INSTALL_DIR/secrets/pane_token"
+            (umask 277; printf '%s' "$TOKEN" > "$INSTALL_DIR/secrets/pane_token")
+            chown "$RUN_USER" "$INSTALL_DIR/secrets/pane_token"
+        fi
+        say "TELEMETRY_SKIP_SERVICE=1: .env and token only."
+        exit 0
+    fi
+
+    # What a fresh Ubuntu box lacks (pane's first install, Nov 13): venv/ensurepip and pip.
+    missing=()
+    command -v python3 >/dev/null || missing+=(python3)
+    # Ubuntu's python3 imports ensurepip even without python3-venv; only making a venv tells.
+    venv_probe="$(mktemp -d)"
+    python3 -m venv "$venv_probe/v" >/dev/null 2>&1 || missing+=(python3-venv)
+    rm -rf "$venv_probe"
+    python3 -m pip --version >/dev/null 2>&1 || missing+=(python3-pip)
+    command -v git >/dev/null || missing+=(git)
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        if [[ -n "$PROFILE" ]] && command -v apt-get >/dev/null; then
+            say "Installing ${missing[*]}…"
+            DEBIAN_FRONTEND=noninteractive apt-get update -q >/dev/null
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -q "${missing[@]}" >/dev/null
+        else
+            report "missing packages" "checked for python3, venv, pip and git" "all present" "missing: ${missing[*]}" \
+                "sudo apt install -y ${missing[*]}, then run ./install.sh again. .env is kept."
+            exit 1
+        fi
+    fi
+
     say "Creating venv…"
     # A venv the service user already owns is rebuilt AS that user: running its pip as root would
     # run whatever that user put there as root (Errata, OPS-19 L5).
@@ -234,6 +401,14 @@ if [[ "$OS" == linux ]]; then
     mkdir -p "$INSTALL_DIR/secrets"
     chown "$RUN_USER" "$INSTALL_DIR/secrets" 2>/dev/null || true
     chmod 0700 "$INSTALL_DIR/secrets"
+    if [[ -n "$TOKEN" ]]; then
+        rm -f "$INSTALL_DIR/secrets/pane_token"
+        (umask 277; printf '%s' "$TOKEN" > "$INSTALL_DIR/secrets/pane_token")
+        chown "$RUN_USER" "$INSTALL_DIR/secrets/pane_token"
+        say "Saved the Pane token to $INSTALL_DIR/secrets/pane_token (0400, $RUN_USER)."
+    elif [[ -f "$INSTALL_DIR/secrets/pane_token" ]]; then
+        chown "$RUN_USER" "$INSTALL_DIR/secrets/pane_token"   # the run user may have changed
+    fi
 
     say "Installing systemd unit + timer (run user: $RUN_USER)…"
     sed -e "s#__INSTALL_DIR__#$INSTALL_DIR#g" -e "s#__RUN_USER__#$RUN_USER#g" \
@@ -245,7 +420,7 @@ if [[ "$OS" == linux ]]; then
     systemctl enable --now "${SERVICE_NAME}.timer"
     say "Done. Timer active. Run now:  sudo systemctl start ${SERVICE_NAME}.service"
     say "Logs:  journalctl -u ${SERVICE_NAME}.service -f"
-    say "Pane: put this box's token in $INSTALL_DIR/secrets/pane_token (0400, owned by $RUN_USER) — see README."
+    [[ -n "$TOKEN" ]] || say "Pane: put this box's token in $INSTALL_DIR/secrets/pane_token (0400, owned by $RUN_USER) — see README."
     [[ "$INSTALL_DIR" == /opt/telemetry ]] || \
         say "      Install dir isn't /opt/telemetry: also set PANE_TOKEN_FILE=$INSTALL_DIR/secrets/pane_token in .env."
     exit 0
