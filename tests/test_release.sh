@@ -90,6 +90,12 @@ esac
 printf '%s\n' "$json" | jq -r "$expr"
 GH
 chmod +x "$work/bin/gh"
+# Windows' sort.exe ahead of GNU sort on PATH (cmd's `sh release.sh`, Nov 13): release.sh must not need sort.
+cat >"$work/bin/sort" <<'SORT'
+#!/usr/bin/env bash
+echo "-VThe system cannot find the file specified." >&2; exit 1
+SORT
+chmod +x "$work/bin/sort"
 export PATH="$work/bin:$PATH" GH_LOG="$work/gh.log" FAKE_ORIGIN="$origin"
 : >"$GH_LOG"
 main() { git -C "$origin" rev-parse main; }
@@ -107,6 +113,7 @@ FAKE_CI=in_progress bash "$clone/release.sh" >"$out" 2>&1 && fail "a release wit
 check "it says CI hasn't passed" has "!!! main's CI hasn't passed"
 check "and shows what CI is doing" has 'Got:      in_progress'
 check "no release was asked for" bash -c '! grep -q "^release" "$1"' _ "$GH_LOG"
+check "the error is reported once" test "$(grep -c '^.*!!! ' "$out")" = 1
 FAKE_CI=failure bash "$clone/release.sh" >"$out" 2>&1 && fail "a release with CI failed was made" "" || CHECKS=$((CHECKS + 1))
 check "a failed CI is refused and shown" has 'Got:      failure'
 FAKE_CI=none bash "$clone/release.sh" >"$out" 2>&1 && fail "a release with no CI was made" "" || CHECKS=$((CHECKS + 1))

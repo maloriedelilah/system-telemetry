@@ -49,7 +49,13 @@ report() {
     printf '\n\033[1;31m!!! %s\033[0m\n    Did:      %s\n    Expected: %s\n    Got:      %s\n    Next:     %s So far: %s.\n' \
         "$1" "$2" "$3" "$4" "$5" "$SO_FAR" >&2
 }
-trap 'report "update.sh stopped: $STEP failed" "$STEP (update.sh line $LINENO)" "it to succeed" "exit $?" "$NEXT_ON_ERR"' ERR
+# Only the main shell reports: set -E carries the trap into $( ) subshells.
+on_err() {
+    local rc=$?
+    [[ $BASHPID == "$$" ]] || return 0
+    report "update.sh stopped: $STEP failed" "$STEP (update.sh line $1)" "it to succeed" "exit $rc" "$NEXT_ON_ERR"
+}
+trap 'on_err $LINENO' ERR
 
 case "$(uname -s)" in
     Linux*)               OS=linux;   DEFAULT_KEY=/etc/telemetry/deploy_key ;;
@@ -189,7 +195,7 @@ if [[ -z "$target" ]]; then
     fi
     # Exactly refs/tags/vX.Y.Z with no leading zeros: a tag named like x/refs/tags/v99.0.0 or v9.0.08
     # is ignored (Errata, OPS-19 L2; OPS-54).
-    target="$(printf '%s\n' "$tags" | awk '$2 ~ /^refs\/tags\/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/ { sub(/^refs\/tags\//, "", $2); print $2 }' | sort -V | tail -n 1)"
+    target="$(printf '%s\n' "$tags" | awk '$2 ~ /^refs\/tags\/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/ { sub(/^refs\/tags\//, "", $2); print $2 }' | awk '{ split(substr($0, 2), p, "."); k = sprintf("%012d%012d%012d", p[1], p[2], p[3]); if (k > best) { best = k; t = $0 } } END { if (t != "") print t }')"
     if [[ -z "$target" ]]; then
         report "no release tags found" "git ls-remote --tags $REPO_URL" "at least one vX.Y.Z tag" "none" "cut a release with ./release.sh on a workstation."
         exit 1
