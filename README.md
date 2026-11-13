@@ -137,6 +137,7 @@ telemetry/          the package
   mqtt.py           HA discovery + state publishing
   pane.py           Influx line protocol + push to Pane
   sites.py          public-site health probes (pane only)
+  heartbeats.py     status files from occasional jobs -> live heartbeats (HEARTBEATS_DIR)
   __main__.py       orchestrator (python -m telemetry)
 install.sh          interactive installer (prompts -> .env, venv, service)
 update.sh           move to the newest release tag (deploy key) + deps + restart
@@ -249,6 +250,7 @@ timestamps and no host tag (Pane adds both). VictoriaMetrics names each series
 | `telemetry` | `up=1 gpus=<n>` (heartbeat every cycle, even with no GPU) |
 | `site,site=<label>,check=<health\|up>` | `up reachable code latency_ms db_ok cert_days` (TELEMETRY_SITES=1; `site_up` is what Pane's Sites page reads) |
 | `site_probe` | `sites healthy control_ok` (TELEMETRY_SITES=1) |
+| `heartbeat,check=<name>` | `ok age_s period_s` (HEARTBEATS_DIR status files) |
 
 Readings that are missing or not finite are left out. The GPU memory percentage is
 `mem_pct`, not `mem_used_*`, on purpose: the dashboard takes the max of every series
@@ -281,6 +283,28 @@ The limits:
 When the control URL fails too (`site_probe control_ok` 0), pane has lost the internet and
 the sites may be fine, so alert rules should hold their fire. An unhealthy site prints one line
 on stderr per cycle; it does not fail the cycle.
+
+### Heartbeat files (jobs that run now and then)
+
+A job that runs once a day can't keep a series alive on Pane by itself: the pages look back a
+few minutes. So the job writes a status file when it finishes, and every telemetry cycle turns
+each entry into `heartbeat,check=<name> ok=..,age_s=..,period_s=..` with the age computed now.
+Those are the names Pane's Heartbeats panels read. The age keeps growing between runs, so a
+backup that stops being made shows as it passes its period.
+
+Set `HEARTBEATS_DIR` to the folder (Chonky: `C:\scripts\status`). Each `*.json` in it:
+
+```json
+{"version": 1, "checks": [
+  {"check": "backup:dbserver daily/app", "last_ok": 1794552000, "period_s": 93600, "ok": true}
+]}
+```
+
+- `last_ok` is in Unix seconds, and `period_s` is how old it may get.
+- `ok: false` means the job itself failed.
+- `ok` on Pane is 1 only if the file says ok and the age is within the period.
+- Bad files and entries are reported by name and number, never by their text, and skipped.
+- Limits: 64 files of 64 KiB each, and 500 checks in all.
 
 ### Checking it is arriving
 

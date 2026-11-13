@@ -116,6 +116,10 @@ TELEMETRY_SITES = _flag("TELEMETRY_SITES", "0")     # probe the public sites' he
 SITES_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sites.txt")
 SITES_CONTROL_URL = "https://www.google.com/generate_204"
 
+# Folder of status files that occasional jobs write (heartbeats.py); empty = off. Chonky's 04:00
+# backup pull writes C:\scripts\status\*.json.
+HEARTBEATS_DIR = os.environ.get("HEARTBEATS_DIR", "").strip()
+
 # Platform flag: the Linux host collector (psutil/lm-sensors) only runs here.
 IS_LINUX = sys.platform.startswith("linux")
 

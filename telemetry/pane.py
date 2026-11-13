@@ -14,6 +14,7 @@ series <measurement>_<field>; the names below are fixed by Pane's fleet dashboar
   mem                            used_gb total_gb used_percent
   disk,disk=<name>               temp_c used_percent
   telemetry                      up=1 gpus=<n>    (heartbeat, every cycle)
+  heartbeat,check=<name>         ok age_s period_s   (HEARTBEATS_DIR status files)
 
 With TELEMETRY_SITES=1 (pane only), site_lines() adds the site probes:
 
@@ -184,6 +185,17 @@ def site_lines(results, control):
             ("healthy", sum(int(r.get("healthy") or 0) for r in results or [])),
             ("control_ok", None if control is None else control.get("reachable")),
         ])
+        if line:
+            lines.append(line)
+    return lines
+
+
+def heartbeat_lines(checks):
+    """Lines for heartbeats.read_all()'s list."""
+    lines = []
+    for c in checks or []:
+        line = _line("heartbeat", [("check", c.get("check"))], [
+            ("ok", c.get("ok")), ("age_s", c.get("age_s")), ("period_s", c.get("period_s"))])
         if line:
             lines.append(line)
     return lines

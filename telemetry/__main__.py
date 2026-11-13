@@ -6,6 +6,7 @@ Reads role flags from config and runs the enabled collectors:
   TELEMETRY_LHM    -> lhm.read_host_and_gpus (host temps; +GPUs if LHM_GPUS)
   TELEMETRY_HOST   -> linux_host.read_host (Linux psutil/hwmon)
   TELEMETRY_SITES  -> sites.probe_all (public sites' /api/health; Pane output only)
+  HEARTBEATS_DIR   -> heartbeats.read_all (status files from occasional jobs; Pane output only)
 
 Data is collected once, then sent to each enabled output independently:
   PANE_URL set  -> pane.push   (Influx line protocol to Pane)
@@ -29,6 +30,7 @@ from . import linux_host
 from . import mqtt as publisher
 from . import pane
 from . import sites
+from . import heartbeats
 
 dbg = config.dbg
 
@@ -68,9 +70,21 @@ def run_once():
                           "one result per site", f"{type(e).__name__}: {e}",
                           "this is a bug in telemetry/sites.py; host and GPU data still go out")
 
-    if not gpus and not host and not site_results and site_control is None:
-        print("No GPUs, no host data and no site probes; nothing to publish "
-              "(check TELEMETRY_NVIDIA / TELEMETRY_LHM / TELEMETRY_HOST / TELEMETRY_SITES).",
+    # Status files from occasional jobs go to Pane only. Fenced off like an output: a bug here must
+    # not cost the host and GPU data.
+    beats = []
+    if config.HEARTBEATS_DIR:
+        try:
+            beats = heartbeats.read_all()
+        except Exception as e:
+            config.report("Heartbeat files crashed", f"read {config.HEARTBEATS_DIR}",
+                          "one entry per check", f"{type(e).__name__}: {e}",
+                          "this is a bug in telemetry/heartbeats.py; host and GPU data still go out")
+
+    if not gpus and not host and not site_results and site_control is None and not beats:
+        print("No GPUs, no host data, no site probes and no heartbeat files; nothing to publish "
+              "(check TELEMETRY_NVIDIA / TELEMETRY_LHM / TELEMETRY_HOST / TELEMETRY_SITES / "
+              "HEARTBEATS_DIR).",
               file=sys.stderr, flush=True)
         return False
     dbg(f"found {len(gpus)} GPU(s):", [g["name"] for g in gpus],
@@ -95,7 +109,8 @@ def run_once():
     if config.PANE_URL:
         try:
             results.append(pane.push(pane.to_lines(gpus, models, host)
-                                     + pane.site_lines(site_results, site_control)))
+                                     + pane.site_lines(site_results, site_control)
+                                     + pane.heartbeat_lines(beats)))
         except Exception as e:
             config.report("Pane output crashed", "build and push the Pane lines",
                           "a push attempt", f"{type(e).__name__}: {e}",
