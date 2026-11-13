@@ -72,11 +72,22 @@ check "llama-server labels" envis 'MODEL_SOURCE=llamaserver'
 check "both URLs" envis 'MODEL_API_URL=http://127.0.0.1:1234,http://127.0.0.1:1235'
 check "the earlier token is kept when none is given" test "$(cat "$box/secrets/pane_token")" = "$TOKEN"
 
-echo "== --sites turns the site probes on (pane), and a rerun without it turns them off"
+echo "== --sites turns the site probes on; a rerun and --reconfigure keep them; --no-sites turns them off"
 run --profile host --pane-url "$URL" --run-user "$USER_T" --sites || fail "--sites failed" "$(tail -n 6 "$out")"
 check "--sites: TELEMETRY_SITES=1" envis 'TELEMETRY_SITES=1'
+check "--sites: it says so" has 'Site probes are on'
 run --profile host --pane-url "$URL" --run-user "$USER_T" || fail "rerun without --sites failed" "$(tail -n 6 "$out")"
-check "no --sites: TELEMETRY_SITES=0" envis 'TELEMETRY_SITES=0'
+check "a rerun without --sites keeps them on (Errata, OPS-59 Blocker)" envis 'TELEMETRY_SITES=1'
+# --reconfigure (the interactive questions, answered from a file): MQTT none, Pane URL, default name,
+# no NVIDIA, host stats yes, no model labels.
+printf 'none\n%s\n\nn\ny\nnone\n' "$URL" >"$work/answers"
+TELEMETRY_TTY_R="$work/answers" TELEMETRY_TTY_W=/dev/null run --reconfigure --run-user "$USER_T" || fail "--reconfigure failed" "$(tail -n 6 "$out")"
+check "--reconfigure asked its questions (MQTT off now)" envis 'MQTT_HOST='
+check "--reconfigure keeps them on" envis 'TELEMETRY_SITES=1'
+run --profile host --pane-url "$URL" --run-user "$USER_T" --no-sites || fail "--no-sites failed" "$(tail -n 6 "$out")"
+check "--no-sites: TELEMETRY_SITES=0" envis 'TELEMETRY_SITES=0'
+run --profile host --pane-url "$URL" --run-user "$USER_T" || fail "rerun after --no-sites failed" "$(tail -n 6 "$out")"
+check "and a rerun keeps them off" envis 'TELEMETRY_SITES=0'
 
 echo "== --profile vm with ollama labels"
 run --profile vm --pane-url "$URL" --run-user "$USER_T" --models ollama=http://127.0.0.1:11434 || fail "vm profile failed" "$(tail -n 6 "$out")"
@@ -163,7 +174,8 @@ expect_refused "root as the run user" "!!! --run-user can't be root" '' -- --pro
 expect_refused "a token with spaces" "!!! that isn't a Pane token" "pw_abc def ghi jkl mno pqr" -- --profile host --pane-url "$URL" --token-stdin
 expect_refused "an empty token" "!!! that isn't a Pane token" "" -- --profile host --pane-url "$URL" --token-stdin
 expect_refused "an unknown option" '!!! unknown argument' '' -- --profile host --pane-url "$URL" --force
-expect_refused "--sites without fleet mode" '!!! --sites is for fleet mode' '' -- --sites
+expect_refused "--sites without fleet mode" '!!! --sites/--no-sites are for fleet mode' '' -- --sites
+expect_refused "--no-sites without fleet mode" '!!! --sites/--no-sites are for fleet mode' '' -- --no-sites
 check "a refused token is never echoed" bash -c '! grep -q "pw_abc" "$1"' _ "$out"
 
 echo

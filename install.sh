@@ -20,6 +20,8 @@
 #   --token-stdin  read this box's Pane token (from pane's add-box.sh) on stdin and save it
 #                  to secrets/pane_token, 0400, owned by the run user.
 #   --sites        also probe the public sites in sites.txt (TELEMETRY_SITES=1; pane only, OPS-59).
+#   --no-sites     turn them off. With neither, the box keeps what its .env already says, so a rerun
+#                  (or --reconfigure) never quietly stops pane probing the sites.
 #   The install dir must be root's in fleet mode, as update.sh requires: secrets/ is safe only
 #   inside a directory the run user can't rearrange.
 #
@@ -42,7 +44,7 @@ INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TTY_R="${TELEMETRY_TTY_R:-/dev/tty}"      # terminal for reading answers (overridable for tests)
 TTY_W="${TELEMETRY_TTY_W:-/dev/tty}"      # terminal for writing prompts
 RECONFIGURE=0
-PROFILE="" PANE_URL_ARG="" MODELS_ARG="" RUN_USER_ARG="" TOKEN_STDIN=0 SITES=0
+PROFILE="" PANE_URL_ARG="" MODELS_ARG="" RUN_USER_ARG="" TOKEN_STDIN=0 SITES=""
 ORIG_ARGS=("$@")
 
 say()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
@@ -63,6 +65,7 @@ while [[ $# -gt 0 ]]; do
         --run-user)    RUN_USER_ARG="${2:-}"; shift 2 || shift ;;
         --token-stdin) TOKEN_STDIN=1; shift ;;
         --sites)       SITES=1; shift ;;
+        --no-sites)    SITES=0; shift ;;
         *) report "unknown argument" "read the command line" \
                "--reconfigure, or --profile host|gpu|vm --pane-url URL [--models ...] [--run-user NAME] [--token-stdin] [--sites]" \
                "'$1'" "check the command (the header of install.sh lists the options). Nothing was changed."
@@ -226,6 +229,7 @@ LHM_GPUS=$LHM_GPUS
 LHM_URL=$LHM_URL
 LHM_GPU_INCLUDE=$LHM_INC
 TELEMETRY_HOST=$HOST_STATS
+TELEMETRY_SITES=$SITES
 
 MODEL_SOURCE=$MODEL_SOURCE
 MODEL_API_URL=$MODEL_URL
@@ -294,10 +298,16 @@ if [[ -n "$PROFILE" ]]; then
             exit 2
         fi
     done
-elif [[ "$SITES" -eq 1 ]]; then
-    report "--sites is for fleet mode" "read --sites" "--profile ... --sites" "--sites without --profile" \
-        "add --profile (the interactive install doesn't set TELEMETRY_SITES). Nothing was changed."
+elif [[ -n "$SITES" ]]; then
+    report "--sites/--no-sites are for fleet mode" "read the options" "--profile ... --sites" "--sites or --no-sites without --profile" \
+        "add --profile (the interactive install keeps whatever .env says). Nothing was changed."
     exit 2
+fi
+# With neither --sites nor --no-sites, keep what .env says now (Errata, OPS-59 Blocker: a rerun or
+# --reconfigure dropped it, and pane stopped probing every site with nothing to say so).
+if [[ -z "$SITES" ]]; then
+    SITES=0
+    grep -qsx 'TELEMETRY_SITES=1' "$INSTALL_DIR/.env" && SITES=1
 fi
 
 # The token, read now (before anything changes) so a bad paste stops the run cleanly.
@@ -351,6 +361,7 @@ DEBUG=0
 ENV
     mv -f -T "$tmp" "$INSTALL_DIR/.env"
     say "Wrote $INSTALL_DIR/.env (profile $PROFILE)"
+    if [[ "$SITES" == 1 ]]; then say "Site probes are on (TELEMETRY_SITES=1). --no-sites turns them off."; fi
 }
 
 # ---------------------------------------------------------------------------
@@ -375,7 +386,7 @@ fi
 # LINUX — venv + systemd
 # ===========================================================================
 if [[ "$OS" == linux ]]; then
-    RUN_USER="${RUN_USER_ARG:-${SUDO_USER:-$USER}}"
+    RUN_USER="${RUN_USER_ARG:-${SUDO_USER:-${USER:-$(id -un)}}}"
     if [[ -n "$RUN_USER_ARG" ]] && ! id -u "$RUN_USER" >/dev/null 2>&1; then
         say "Creating system user '$RUN_USER' for the service…"
         useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "$RUN_USER"

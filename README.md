@@ -70,7 +70,8 @@ sudo ./install.sh --profile host|gpu|vm --pane-url http://<pane>:8427 --run-user
 The profile rewrites `.env` each time, so rerunning the same line puts a drifted box back on
 the standard. `--token-stdin` reads the Pane token on stdin and saves it 0400 for the run user.
 Missing `git`, `python3-venv` or `python3-pip` are installed first. `--sites` turns on the
-public-site probes (pane only; see Site probes below). Fleet mode needs the install dir to be
+public-site probes (pane only; see Site probes below) and `--no-sites` turns them off; with
+neither, a rerun or `--reconfigure` keeps whatever `.env` already says. Fleet mode needs the install dir to be
 root's, as update.sh does.
 
 Re-run to reconfigure:
