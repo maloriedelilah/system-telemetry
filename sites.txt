@@ -1,0 +1,29 @@
+# Public sites Pane probes (TELEMETRY_SITES=1, on pane only). '#' starts a comment.
+# Each line: https URL [health|up] (public addresses only; one line per site label)
+#   health (default)  a health endpoint: 200 + a JSON object whose "status" is "ok" (or "ok" is
+#                     true), and whose "db", if present, is "ok"
+#   up                no health endpoint yet: any 2xx from the page counts
+# Adding or removing a site is a PR here; it reaches pane with the next release. (OPS-59)
+
+# authortools.net
+https://write.authortools.net/api/health
+https://accounts.authortools.net/api/health
+https://home.authortools.net/api/health
+https://ad-copy.authortools.net/api/health
+https://video.authortools.net/api/health
+https://flightdeck.authortools.net/api/health
+https://blog.authortools.net/  up              # /api/health/ answers 401
+https://corpus.authortools.net/api/health
+https://lens.authortools.net/  up              # no health route yet (SPA answers every path)
+https://bookmockups.authortools.net/  up       # no health route yet
+https://metaapi.authortools.net/api/health
+https://amazonapi.authortools.net/healthz  up       # answers plain "ok", not JSON
+https://help.authortools.net/  up              # no health route yet
+
+# soyarma.net
+https://board.soyarma.net/api/health
+https://aidb.soyarma.net/health
+https://keystone.soyarma.net/health
+https://confluence.soyarma.net/api/health
+
+# AuthorRing: add once it has moved to Cloudflare Workers.

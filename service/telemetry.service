@@ -10,6 +10,9 @@ Wants=network-online.target
 Type=oneshot
 WorkingDirectory=__INSTALL_DIR__
 ExecStart=__INSTALL_DIR__/venv/bin/python -m telemetry
+# A cycle takes a few seconds (the site probes stop at SITES_DEADLINE, 15 s). If one ever hangs
+# anyway, systemd kills it so the timer fires again, instead of the box going quiet (OPS-59).
+TimeoutStartSec=60
 # Run as the invoking user (install.sh fills these in).
 User=__RUN_USER__
 

@@ -5,6 +5,7 @@ Reads role flags from config and runs the enabled collectors:
   TELEMETRY_NVIDIA -> nvidia.read_gpus + nvidia.read_models
   TELEMETRY_LHM    -> lhm.read_host_and_gpus (host temps; +GPUs if LHM_GPUS)
   TELEMETRY_HOST   -> linux_host.read_host (Linux psutil/hwmon)
+  TELEMETRY_SITES  -> sites.probe_all (public sites' /api/health; Pane output only)
 
 Data is collected once, then sent to each enabled output independently:
   PANE_URL set  -> pane.push   (Influx line protocol to Pane)
@@ -27,6 +28,7 @@ from . import lhm
 from . import linux_host
 from . import mqtt as publisher
 from . import pane
+from . import sites
 
 dbg = config.dbg
 
@@ -48,9 +50,27 @@ def run_once():
     if host is None and config.TELEMETRY_HOST and config.IS_LINUX:
         host = linux_host.read_host()
 
-    if not gpus and not host:
-        print("No GPUs and no host data; nothing to publish "
-              "(check TELEMETRY_NVIDIA / TELEMETRY_LHM / TELEMETRY_HOST).",
+    # Site probes go to Pane only (Home Assistant has no use for them). A probe never raises,
+    # but a bug here must not cost the host and GPU data, so it is fenced off like an output.
+    site_results, site_control = [], None
+    if config.TELEMETRY_SITES and config.LOOP_INTERVAL:
+        # A probe stuck past its deadline is abandoned in a daemon thread, which only ends when
+        # the process does: fine for the oneshot timer, a slow leak in loop mode (Errata, OPS-59).
+        config.report("Site probes are off in loop mode", "read TELEMETRY_SITES and LOOP_INTERVAL",
+                      "TELEMETRY_SITES=1 only with the systemd timer (LOOP_INTERVAL empty)",
+                      f"LOOP_INTERVAL={config.LOOP_INTERVAL}",
+                      "run them on a Linux box with the timer (pane), or set TELEMETRY_SITES=0")
+    elif config.TELEMETRY_SITES:
+        try:
+            site_results, site_control = sites.probe_all()
+        except Exception as e:
+            config.report("Site probes crashed", "probe the sites in SITES_FILE",
+                          "one result per site", f"{type(e).__name__}: {e}",
+                          "this is a bug in telemetry/sites.py; host and GPU data still go out")
+
+    if not gpus and not host and not site_results and site_control is None:
+        print("No GPUs, no host data and no site probes; nothing to publish "
+              "(check TELEMETRY_NVIDIA / TELEMETRY_LHM / TELEMETRY_HOST / TELEMETRY_SITES).",
               file=sys.stderr, flush=True)
         return False
     dbg(f"found {len(gpus)} GPU(s):", [g["name"] for g in gpus],
@@ -74,7 +94,8 @@ def run_once():
     results = []
     if config.PANE_URL:
         try:
-            results.append(pane.push(pane.to_lines(gpus, models, host)))
+            results.append(pane.push(pane.to_lines(gpus, models, host)
+                                     + pane.site_lines(site_results, site_control)))
         except Exception as e:
             config.report("Pane output crashed", "build and push the Pane lines",
                           "a push attempt", f"{type(e).__name__}: {e}",
