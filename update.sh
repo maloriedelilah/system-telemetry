@@ -20,8 +20,9 @@
 # - After checking out the tag it re-runs as the NEW update.sh to finish (pip
 #   install as the venv's owner, restart). Finishing is recorded, so a rerun
 #   after a failed finish finishes instead of saying "already there".
-# - Every vX.Y.Z tag on the repo is code this runs as root: protect v* tags on
-#   GitHub (README, Update).
+# - Only a tag whose commit is on main is installed (main takes only reviewed,
+#   CI-green PRs); one off main is refused before anything is checked out. Also
+#   protect v* tags on GitHub (README, Update).
 #
 # Env (odd boxes and tests):
 #   TELEMETRY_DEPLOY_KEY   the private key (default /etc/telemetry/deploy_key,
@@ -135,7 +136,7 @@ fi
 command -v git >/dev/null || { report "git is not installed" "looked for git" "git on PATH" "not found" "install git (apt install git, or Git for Windows), then run ./update.sh again."; exit 2; }
 
 target="${1:-}"
-if [[ -n "$target" && ! "$target" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+if [[ -n "$target" && ! "$target" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
     report "not a release tag" "read the argument" "vX.Y.Z, e.g. v1.4.0" "'$target'" "pass a release tag, or nothing for the newest."
     exit 2
 fi
@@ -186,8 +187,9 @@ if [[ -z "$target" ]]; then
             "check the deploy key is added to the repo (read-only is enough), the box reaches github.com on port 22, and, if ssh says the host key doesn't match, compare GitHub's key at api.github.com/meta with the one pinned in update.sh."
         exit 1
     fi
-    # Exactly refs/tags/vX.Y.Z: a tag named like x/refs/tags/v99.0.0 is ignored (Errata, OPS-19 L2).
-    target="$(printf '%s\n' "$tags" | awk '$2 ~ /^refs\/tags\/v[0-9]+\.[0-9]+\.[0-9]+$/ { sub(/^refs\/tags\//, "", $2); print $2 }' | sort -V | tail -n 1)"
+    # Exactly refs/tags/vX.Y.Z with no leading zeros: a tag named like x/refs/tags/v99.0.0 or v9.0.08
+    # is ignored (Errata, OPS-19 L2; OPS-54).
+    target="$(printf '%s\n' "$tags" | awk '$2 ~ /^refs\/tags\/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/ { sub(/^refs\/tags\//, "", $2); print $2 }' | sort -V | tail -n 1)"
     if [[ -z "$target" ]]; then
         report "no release tags found" "git ls-remote --tags $REPO_URL" "at least one vX.Y.Z tag" "none" "cut a release with ./release.sh on a workstation."
         exit 1
@@ -218,15 +220,42 @@ else
     STEP="git remote set-url"
     g remote set-url origin "$REPO_URL" 2>/dev/null || g remote add origin "$REPO_URL"
 fi
-say "Fetching $target…"
-if ! g fetch -q --depth 1 origin "refs/tags/$target:refs/tags/$target" 2>"$tmp/err"; then
+say "Fetching $target and main…"
+# main in full, with the tag: the check below needs main's history. An install an older update.sh
+# fetched with --depth 1 is unshallowed, or its shallow boundary would hide a downgrade's commit.
+FETCH=(fetch -q)
+[[ "$(g rev-parse --is-shallow-repository 2>/dev/null || true)" == true ]] && FETCH+=(--unshallow)
+if ! g "${FETCH[@]}" origin "refs/tags/$target:refs/tags/$target" "+refs/heads/main:refs/remotes/origin/main" 2>"$tmp/err"; then
     got="$(tr '\n' ' ' <"$tmp/err")"
     if [[ "$fresh_git" == 1 ]]; then
         rm -rf "$INSTALL_DIR/.git"
         SO_FAR="nothing was changed (the .git this run started was removed)"
     fi
-    report "could not fetch $target" "git fetch origin refs/tags/$target" "the tag's commit" "$got" \
+    report "could not fetch $target" "git fetch origin refs/tags/$target and main" "the tag's commit and main" "$got" \
         "check the tag exists (git ls-remote --tags) and the deploy key works, then run ./update.sh again."
+    exit 1
+fi
+
+# Only a tag on main is installed: main takes only reviewed, CI-green PRs, so this ties what runs here
+# as root to reviewed code whatever the tag rules on GitHub say. It runs in this box's own update.sh,
+# before the checkout, so a rogue tag's update.sh never gets to skip it (Errata, OPS-54).
+STEP="checking $target is on main"
+onmain=0
+g merge-base --is-ancestor "refs/tags/$target^{commit}" refs/remotes/origin/main 2>"$tmp/err" || onmain=$?
+if [[ "$onmain" != 0 ]]; then
+    sha="$(g rev-parse --short "refs/tags/$target^{commit}" 2>/dev/null || echo '?')"
+    g tag -d "$target" >/dev/null 2>&1 || true
+    if [[ "$fresh_git" == 1 ]]; then
+        rm -rf "$INSTALL_DIR/.git"
+        SO_FAR="nothing was changed (the .git this run started was removed)"
+    fi
+    if [[ "$onmain" == 1 ]]; then
+        got="$target is commit $sha, which main doesn't contain"
+    else
+        got="the check itself failed: $(tr '\n' ' ' <"$tmp/err")"
+    fi
+    report "$target isn't on main" "git merge-base --is-ancestor $target origin/main" "a release tag on a commit of main (reviewed, CI-green code)" "$got" \
+        "don't install it. A release tag off main is a mistake or code nobody reviewed: tell Malorie and Hopper. To stay put, do nothing; ./update.sh vX.Y.Z installs a release that is on main."
     exit 1
 fi
 

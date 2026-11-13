@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# tests/test_release.sh — release.sh against a local repo standing in for GitHub, with a fake gh.
-# The fake gh answers the CI check from $FAKE_CI and makes `gh release create` tag the "GitHub"
-# repo at --target, as GitHub does. Run: bash tests/test_release.sh
+# tests/test_release.sh — release.sh against a local repo standing in for GitHub, with a fake gh
+# that answers like GitHub's REST API (and applies --jq with jq). Run: bash tests/test_release.sh
 set -Eeuo pipefail
 cd "$(dirname "$0")/.."
 SRC="$PWD"
@@ -14,39 +13,81 @@ work="$(mktemp -d)"; out="$(mktemp)"
 trap 'rm -rf "$work" "$out"' EXIT
 G=(git -c user.name=test -c user.email=test@example.invalid -c init.defaultBranch=main)
 
-# The "GitHub" repo: main with an annotated v1.2.0, a lightweight v1.10.0 (sort -V, not text order)
-# and a decoy x/refs/tags/v99.0.0 that must never count as a release.
+# The "GitHub" repo: a lightweight v1.2.0, an annotated v1.10.0 (sort -V, not text order; and
+# annotated, so the "already released" check must compare the commit, not the tag object), and
+# decoys that must never count as releases: x/refs/tags/v99.0.0, v9.0.08 (a leading zero), and
+# v99.0.0-evil.
 origin="$work/origin"
 mkdir -p "$origin"
 "${G[@]}" -C "$origin" init -q
 echo one >"$origin/f"; "${G[@]}" -C "$origin" add f; "${G[@]}" -C "$origin" commit -qm one
-"${G[@]}" -C "$origin" tag -a v1.2.0 -m v1.2.0
+"${G[@]}" -C "$origin" tag v1.2.0
 echo two >"$origin/f"; "${G[@]}" -C "$origin" commit -qam two
-"${G[@]}" -C "$origin" tag v1.10.0
+"${G[@]}" -C "$origin" tag -a v1.10.0 -m v1.10.0
 "${G[@]}" -C "$origin" tag x/refs/tags/v99.0.0
-echo three >"$origin/f"; "${G[@]}" -C "$origin" commit -qam three
+"${G[@]}" -C "$origin" tag v9.0.08
+"${G[@]}" -C "$origin" tag v99.0.0-evil
 
-# The maintainer's clone, with this checkout's release.sh (untracked: release.sh never reads the tree).
+# The maintainer's clone, with this checkout's release.sh. Its origin is a stale copy at commit one:
+# release.sh must read main and the tags from GitHub (the fake gh), never from the clone.
+stale="$work/stale"
+git clone -q "$origin" "$stale"
+git -C "$stale" reset -q --hard HEAD~1
 clone="$work/clone"
-git clone -q "$origin" "$clone"
+git clone -q "$stale" "$clone"
 cp "$SRC/release.sh" "$clone/"
 echo "a local edit that must not matter" >>"$clone/f"
 
-# The fake gh.
+# The fake gh: builds the JSON GitHub's REST API would return, from the "GitHub" repo, and applies
+# the caller's --jq to it with jq, so release.sh's jq expressions are what the tests exercise.
+# The CI check comes from $FAKE_CI (success, failure, in_progress, none). `gh release create` tags
+# the "GitHub" repo at --target, lightweight, as GitHub does.
 mkdir -p "$work/bin"
 cat >"$work/bin/gh" <<'GH'
 #!/usr/bin/env bash
+set -euo pipefail
 printf '%s\n' "$*" >>"$GH_LOG"
-case "$1" in
-    api) printf '%s\n' "${FAKE_CI:-success}" ;;
-    release)
-        tag="$3"; target=""
-        shift 3
-        while [ $# -gt 0 ]; do [ "$1" = --target ] && target="$2"; shift; done
-        [ "${FAKE_RELEASE_FAIL:-0}" = 1 ] && { echo "HTTP 422: tag rejected by a ruleset" >&2; exit 1; }
-        git -C "$FAKE_ORIGIN" tag "$tag" "$target"
-        ;;
+o="$FAKE_ORIGIN"
+if [ "$1" = release ]; then
+    tag="$3"; target=""
+    shift 3
+    while [ $# -gt 0 ]; do [ "$1" = --target ] && target="$2"; shift; done
+    [ "${FAKE_RELEASE_FAIL:-0}" = 1 ] && { echo "HTTP 422: tag rejected by a ruleset" >&2; exit 1; }
+    git -C "$o" tag "$tag" "$target"
+    exit 0
+fi
+path=""; expr="."
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --jq) expr="$2"; shift 2 ;;
+        repos/*) path="$1"; shift ;;
+        *) shift ;;
+    esac
+done
+case "$path" in
+    repos/maloriedelilah/system-telemetry/*) path="${path#repos/maloriedelilah/system-telemetry/}" ;;
+    *) echo "HTTP 404: Not Found ($path)" >&2; exit 1 ;;
 esac
+case "$path" in
+    commits/*/check-runs\?check_name=test)
+        case "${FAKE_CI:-success}" in
+            none) json='{"check_runs":[]}' ;;
+            success|failure|cancelled|neutral|skipped)
+                json="$(jq -n --arg c "${FAKE_CI:-success}" '{check_runs:[{name:"test",status:"completed",conclusion:$c}]}')" ;;
+            *) json="$(jq -n --arg s "$FAKE_CI" '{check_runs:[{name:"test",status:$s,conclusion:null}]}')" ;;
+        esac ;;
+    commits/*)
+        ref="${path#commits/}"
+        sha="$(git -C "$o" rev-parse -q --verify "$ref^{commit}")" || { echo "HTTP 422: No commit found for SHA: $ref" >&2; exit 1; }
+        json="$(jq -n --arg s "$sha" '{sha:$s}')" ;;
+    git/matching-refs/tags/v)
+        # Every ref starting refs/tags/v, with the object it points at (an annotated tag's own object).
+        json="$(git -C "$o" for-each-ref --format='%(refname) %(objectname) %(objecttype)' refs/tags \
+            | awk '$1 ~ /^refs\/tags\/v/' \
+            | jq -R 'split(" ") | {ref:.[0], object:{sha:.[1], type:.[2]}}' | jq -s .)" ;;
+    *) echo "HTTP 404: Not Found ($path)" >&2; exit 1 ;;
+esac
+printf '%s\n' "$json" | jq -r "$expr"
 GH
 chmod +x "$work/bin/gh"
 export PATH="$work/bin:$PATH" GH_LOG="$work/gh.log" FAKE_ORIGIN="$origin"
@@ -54,11 +95,23 @@ export PATH="$work/bin:$PATH" GH_LOG="$work/gh.log" FAKE_ORIGIN="$origin"
 main() { git -C "$origin" rev-parse main; }
 tag_at() { git -C "$origin" rev-parse "$1^{commit}" 2>/dev/null; }
 
+echo "== release.sh: main is the newest release, an annotated tag"
+bash "$clone/release.sh" >"$out" 2>&1 && fail "main was released again over an annotated tag" "$(tail -n 4 "$out")" || CHECKS=$((CHECKS + 1))
+check "it says main is already released" has '!!! main is already released'
+check "and names v1.10.0, not a decoy" has 'main is v1.10.0'
+check "it read main from GitHub" grep -q 'repos/maloriedelilah/system-telemetry/commits/main' "$GH_LOG"
+echo three >"$origin/f"; "${G[@]}" -C "$origin" commit -qam three
+
 echo "== release.sh: main's CI hasn't passed"
 FAKE_CI=in_progress bash "$clone/release.sh" >"$out" 2>&1 && fail "a release with CI running was made" "" || CHECKS=$((CHECKS + 1))
 check "it says CI hasn't passed" has "!!! main's CI hasn't passed"
 check "and shows what CI is doing" has 'Got:      in_progress'
 check "no release was asked for" bash -c '! grep -q "^release" "$1"' _ "$GH_LOG"
+FAKE_CI=failure bash "$clone/release.sh" >"$out" 2>&1 && fail "a release with CI failed was made" "" || CHECKS=$((CHECKS + 1))
+check "a failed CI is refused and shown" has 'Got:      failure'
+FAKE_CI=none bash "$clone/release.sh" >"$out" 2>&1 && fail "a release with no CI was made" "" || CHECKS=$((CHECKS + 1))
+check "no CI at all is refused and shown" has 'Got:      none'
+check "still no release asked for" bash -c '! grep -q "^release" "$1"' _ "$GH_LOG"
 
 echo "== release.sh: GitHub refuses the release"
 FAKE_RELEASE_FAIL=1 bash "$clone/release.sh" >"$out" 2>&1 && fail "a refused release was reported as made" "" || CHECKS=$((CHECKS + 1))
@@ -68,11 +121,10 @@ check "So far says nothing was released" has 'So far: nothing was released'
 
 echo "== release.sh: a patch release tags main's commit, after the newest by version order"
 if bash "$clone/release.sh" >"$out" 2>&1; then CHECKS=$((CHECKS + 1)); else fail "the patch release failed" "$(tail -n 8 "$out")"; fi
-check "it's v1.10.1 (after v1.10.0, not v1.2.0 or the decoy)" has 'Releasing v1.10.1'
-check "the tag names main's commit" test "$(tag_at v1.10.1)" = "$(main)"
+check "it's v1.10.1 (after v1.10.0; not v1.2.0, v9.0.08 or the decoys)" has 'Releasing v1.10.1'
+check "the tag names GitHub's main, not the clone's stale origin" test "$(tag_at v1.10.1)" = "$(main)"
 check "gh got main's commit as the target" grep -q -- "--target $(main)" "$GH_LOG"
 check "the CI check asked was 'test' on main's commit" grep -q "commits/$(main)/check-runs?check_name=test" "$GH_LOG"
-check "the clone has the tag too" git -C "$clone" show-ref -q --verify refs/tags/v1.10.1
 check "nothing was committed to main" test "$(git -C "$origin" log --format=%s -1 main)" = three
 check "the clone's local edit is untouched" grep -q 'must not matter' "$clone/f"
 

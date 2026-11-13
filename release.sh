@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
 # release.sh — cut a release in one command: GitHub tags main's current commit
-# vX.Y.Z and publishes the release. Dev-machine tool; needs git and gh
-# (gh auth login).
+# vX.Y.Z and publishes the release. Dev-machine tool; needs gh (gh auth login).
 #
 #   ./release.sh           # next patch  (v1.4.0 -> v1.4.1)
 #   ./release.sh minor     #             (v1.4.0 -> v1.5.0)
@@ -32,34 +31,38 @@ report() {
 }
 trap 'report "release.sh stopped" "line $LINENO" "it to succeed" "exit $?" "read the error above and run it again."' ERR
 
-for tool in git gh; do
-    if ! command -v "$tool" >/dev/null; then
-        report "$tool not found" "command -v $tool" "$tool installed" "not on PATH" "install it (gh: then gh auth login) and run ./release.sh again."
-        exit 1
-    fi
-done
+if ! command -v gh >/dev/null; then
+    report "gh not found" "command -v gh" "the GitHub CLI installed" "not on PATH" "install it, run gh auth login, then ./release.sh again."
+    exit 1
+fi
 
 err="$(mktemp)"; trap 'rm -f "$err"' EXIT
 
 # --- what GitHub has: main's commit and the release tags -------------------
-if ! main_sha="$(git ls-remote origin refs/heads/main 2>"$err" | awk '{ print $1 }')" || [[ -z "$main_sha" ]]; then
-    report "could not read main" "git ls-remote origin refs/heads/main" "main's commit" "$(tr '\n' ' ' <"$err")" "check this clone's origin and your access, then run it again."
+# All read from $SLUG on GitHub, the repo the release is made on (not this clone's origin).
+if ! main_sha="$(gh api "repos/$SLUG/commits/main" --jq '.sha' 2>"$err")" || [[ ! "$main_sha" =~ ^[0-9a-f]{40}$ ]]; then
+    report "could not read main" "gh api repos/$SLUG/commits/main" "main's commit" "$(tr '\n' ' ' <"$err")${main_sha}" "check gh auth status and your access to $SLUG, then run it again."
     exit 1
 fi
-if ! tags="$(git ls-remote --tags origin 'v*' 2>"$err")"; then
-    report "could not list the releases" "git ls-remote --tags origin" "the vX.Y.Z tags" "$(tr '\n' ' ' <"$err")" "check this clone's origin and your access, then run it again."
+if ! tags="$(gh api --paginate "repos/$SLUG/git/matching-refs/tags/v" --jq '.[].ref' 2>"$err")"; then
+    report "could not list the releases" "gh api repos/$SLUG/git/matching-refs/tags/v" "the vX.Y.Z tags" "$(tr '\n' ' ' <"$err")" "check gh auth status, then run it again."
     exit 1
 fi
-# Exactly refs/tags/vX.Y.Z, as update.sh picks them (a tag named like x/refs/tags/v99.0.0 is ignored).
-newest="$(printf '%s\n' "$tags" | awk '$2 ~ /^refs\/tags\/v[0-9]+\.[0-9]+\.[0-9]+$/ { sub(/^refs\/tags\//, "", $2); print $2 }' | sort -V | tail -n 1)"
-newest="${newest:-v0.0.0}"
+# Exactly refs/tags/vX.Y.Z with no leading zeros, as update.sh picks them.
+newest="$(printf '%s\n' "$tags" | awk '$1 ~ /^refs\/tags\/v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/ { sub(/^refs\/tags\//, "", $1); print $1 }' | sort -V | tail -n 1)"
 
-# The commit the newest tag names (an annotated tag's peeled ^{} line wins over the tag object).
-newest_sha="$(printf '%s\n' "$tags" | awk -v t="refs/tags/$newest" '$2 == t && !c { c = $1 } $2 == t "^{}" { p = $1 } END { print (p ? p : c) }')"
-if [[ "$newest_sha" == "$main_sha" ]]; then
-    report "main is already released" "compare main with $newest" "a commit on main since $newest" "main is $newest (${main_sha:0:7})" "merge something first; there's nothing new to release."
-    exit 1
+if [[ -n "$newest" ]]; then
+    # The commit the newest tag names: GitHub peels an annotated tag to its commit here.
+    if ! newest_sha="$(gh api "repos/$SLUG/commits/refs/tags/$newest" --jq '.sha' 2>"$err")"; then
+        report "could not read $newest" "gh api repos/$SLUG/commits/refs/tags/$newest" "its commit" "$(tr '\n' ' ' <"$err")" "check gh auth status, then run it again."
+        exit 1
+    fi
+    if [[ "$newest_sha" == "$main_sha" ]]; then
+        report "main is already released" "compare main with $newest" "a commit on main since $newest" "main is $newest (${main_sha:0:7})" "merge something first; there's nothing new to release."
+        exit 1
+    fi
 fi
+newest="${newest:-v0.0.0}"
 
 # --- the next version -------------------------------------------------------
 IFS=. read -r MA MI PA <<<"${newest#v}"
@@ -102,5 +105,6 @@ if ! gh release create "$TAG" --repo "$SLUG" --target "$main_sha" --title "$TAG"
     exit 1
 fi
 SO_FAR="$TAG is released"
-git fetch -q origin "refs/tags/$TAG:refs/tags/$TAG" 2>/dev/null || true
+# This clone sees the new tag too (best effort; the release is already made).
+{ command -v git >/dev/null && git fetch -q origin "refs/tags/$TAG:refs/tags/$TAG"; } 2>/dev/null || true
 say "Done: $TAG. On each box: sudo ./update.sh"

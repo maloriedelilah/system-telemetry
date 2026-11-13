@@ -15,22 +15,25 @@ trap 'rm -rf "$work" "$out"' EXIT
 G=(git -c user.name=test -c user.email=test@example.invalid -c init.defaultBranch=main)
 
 # The "GitHub" repo: v1.0.0 is this checkout's update.sh; v1.1.0 changes update.sh (so the
-# re-exec is visible) and the version.
+# re-exec is visible) and release.txt (so the files show which release is checked out).
 origin="$work/origin"
 mkdir -p "$origin/telemetry"
 cp "$SRC/update.sh" "$SRC/.gitignore" "$SRC/requirements.txt" "$origin/"
-printf '__version__ = "1.0.0"\n' >"$origin/telemetry/__init__.py"
+printf '"""fixture"""\n' >"$origin/telemetry/__init__.py"
+printf 'release 1.0.0\n' >"$origin/release.txt"
 "${G[@]}" -C "$origin" init -q
 "${G[@]}" -C "$origin" add -A
 "${G[@]}" -C "$origin" commit -qm v1.0.0
 "${G[@]}" -C "$origin" tag -a v1.0.0 -m v1.0.0
 sed -i 's/Skipping pip and the service/Skipping pip and the service (new update.sh)/' "$origin/update.sh"
-printf '__version__ = "1.1.0"\n' >"$origin/telemetry/__init__.py"
+printf 'release 1.1.0\n' >"$origin/release.txt"
 "${G[@]}" -C "$origin" commit -qam v1.1.0
 # Lightweight, as release.sh's tags are (GitHub makes them); v1.0.0 above is annotated.
 "${G[@]}" -C "$origin" tag v1.1.0
 # A tag whose name merely ends like a release must never be picked (Errata, OPS-19 L2).
 "${G[@]}" -C "$origin" tag x/refs/tags/v99.0.0 v1.0.0
+# Nor one with a leading zero, though it's on main and sorts newest (OPS-54).
+"${G[@]}" -C "$origin" tag v9.0.08 v1.1.0
 export TELEMETRY_REPO="$origin" TELEMETRY_SKIP_SERVICE=1
 
 # A box from the tarball days: v1.0.0's files, no .git, plus its own config and secrets.
@@ -58,7 +61,7 @@ check ".env is kept" grep -q 'PANE_URL=http://pane:8427' "$box/.env"
 check "secrets/ is kept" test -f "$box/secrets/pane_token"
 check "the venv and logs are kept" test -f "$box/venv/marker" -a -f "$box/logs/telemetry.log"
 check "git sees no local changes" test -z "$(git -c safe.directory="$box" -C "$box" status --porcelain --untracked-files=no)"
-check "the newest real tag won, not x/refs/tags/v99.0.0" test "$(at)" = v1.1.0
+check "the newest real tag won, not x/refs/tags/v99.0.0 or v9.0.08" test "$(at)" = v1.1.0
 check "the hand-edited file is listed" has 'requirements.txt'
 check "and its old copy is kept" bash -c 'grep -q "a hand edit from the tarball days" "$1"/.pre-update-*/requirements.txt' _ "$box"
 check "the finish was recorded" test "$(cat "$box/.git/telemetry-finished")" = v1.1.0
@@ -66,6 +69,30 @@ check "the finish was recorded" test "$(cat "$box/.git/telemetry-finished")" = v
 echo "== update.sh: a second run changes nothing"
 bash "$box/update.sh" >"$out" 2>&1 || fail "the second run failed" "$(tail -n 8 "$out")"
 check "it says it's already there" has 'Already at v1.1.0'
+
+echo "== update.sh: a release tag off main is refused, newest or named, before any checkout (OPS-54)"
+"${G[@]}" -C "$origin" checkout -q -b unreviewed v1.1.0
+printf 'PWNED\n' >"$origin/pwned.txt"
+"${G[@]}" -C "$origin" add pwned.txt
+"${G[@]}" -C "$origin" commit -qm unreviewed
+"${G[@]}" -C "$origin" tag v1.2.0
+"${G[@]}" -C "$origin" checkout -q main
+bash "$box/update.sh" >"$out" 2>&1 && fail "the newest tag, off main, was installed" "$(tail -n 4 "$out")" || CHECKS=$((CHECKS + 1))
+check "it says the tag isn't on main" has "!!! v1.2.0 isn't on main"
+check "it names the commit" has "which main doesn't contain"
+check "still at v1.1.0" test "$(at)" = v1.1.0
+check "nothing from the branch reached the box" test ! -e "$box/pwned.txt"
+check "the rogue tag isn't kept on the box" bash -c '! git -c safe.directory="$1" -C "$1" rev-parse -q --verify refs/tags/v1.2.0' _ "$box"
+bash "$box/update.sh" v1.2.0 >"$out" 2>&1 && fail "a named tag off main was installed" "" || CHECKS=$((CHECKS + 1))
+check "named, it's refused too" has "!!! v1.2.0 isn't on main"
+check "and the box is still at v1.1.0" test "$(at)" = v1.1.0
+box3="$work/box3"; mkdir -p "$box3"
+"${G[@]}" -C "$origin" archive v1.0.0 | tar -x -C "$box3"
+bash "$box3/update.sh" >"$out" 2>&1 && fail "a conversion installed a tag off main" "" || CHECKS=$((CHECKS + 1))
+check "a conversion refuses it" has "!!! v1.2.0 isn't on main"
+check "and removes the .git it started" test ! -e "$box3/.git"
+check "So far says nothing was changed" has 'the .git this run started was removed'
+"${G[@]}" -C "$origin" tag -d v1.2.0 >/dev/null
 
 echo "== update.sh: a finish that didn't complete is finished on the rerun"
 rm -f "$box/.git/telemetry-finished"
@@ -76,7 +103,7 @@ check "and records it" test "$(cat "$box/.git/telemetry-finished")" = v1.1.0
 echo "== update.sh: a named tag"
 bash "$box/update.sh" v1.0.0 >"$out" 2>&1 || fail "update.sh v1.0.0 failed" "$(tail -n 8 "$out")"
 check "it's at v1.0.0" test "$(at)" = v1.0.0
-check "the version file matches" grep -q '1.0.0' "$box/telemetry/__init__.py"
+check "the files are v1.0.0's" grep -qx 'release 1.0.0' "$box/release.txt"
 bash "$box/update.sh" >"$out" 2>&1 || fail "back to the newest failed" "$(tail -n 8 "$out")"
 check "and back to v1.1.0" test "$(at)" = v1.1.0
 
@@ -100,6 +127,19 @@ check "it says it's resuming" has 'resuming it'
 check "it's at v1.1.0" test "$(git -c safe.directory="$box2" -C "$box2" describe --tags --exact-match HEAD)" = v1.1.0
 check ".env is kept" grep -q 'X=1' "$box2/.env"
 
+echo "== update.sh: an install an older update.sh fetched shallow is unshallowed, so a downgrade works"
+box4="$work/box4"; mkdir -p "$box4"
+git -C "$box4" init -q
+git -C "$box4" remote add origin "$origin"
+git -C "$box4" fetch -q --depth 1 origin refs/tags/v1.1.0:refs/tags/v1.1.0
+git -C "$box4" checkout -q --detach refs/tags/v1.1.0
+printf 'v1.1.0\n' >"$box4/.git/telemetry-finished"
+check "the old-style install is shallow" test "$(git -C "$box4" rev-parse --is-shallow-repository)" = true
+bash "$box4/update.sh" v1.0.0 >"$out" 2>&1 || fail "the downgrade on a shallow install failed" "$(tail -n 8 "$out")"
+check "it's at v1.0.0" test "$(git -C "$box4" describe --tags --exact-match HEAD)" = v1.0.0
+check "with v1.0.0's files" grep -qx 'release 1.0.0' "$box4/release.txt"
+check "and isn't shallow any more" test "$(git -C "$box4" rev-parse --is-shallow-repository)" = false
+
 echo "== update.sh: an install dir that isn't root's is refused"
 chown 65534 "$box/.git"
 bash "$box/update.sh" >"$out" 2>&1 && fail "a non-root .git was accepted" "" || CHECKS=$((CHECKS + 1))
@@ -109,6 +149,8 @@ chown 0 "$box/.git"
 echo "== update.sh: bad input and a missing deploy key are refused"
 bash "$box/update.sh" 1.2 >"$out" 2>&1 && fail "'1.2' was accepted" "" || CHECKS=$((CHECKS + 1))
 check "a bad tag says what a tag looks like" has 'vX.Y.Z'
+bash "$box/update.sh" v1.02.0 >"$out" 2>&1 && fail "'v1.02.0' was accepted" "" || CHECKS=$((CHECKS + 1))
+check "a leading zero is refused too" has '!!! not a release tag'
 TELEMETRY_REPO=git@github.com:example/none.git TELEMETRY_DEPLOY_KEY="$work/nope" bash "$box/update.sh" >"$out" 2>&1 \
     && fail "a missing key was accepted" "" || CHECKS=$((CHECKS + 1))
 check "a missing key says how to make one" has '!!! no deploy key on this box'
