@@ -43,6 +43,23 @@ check "but can't add anything to secrets/" bash -c '! runuser -u "$1" -- touch "
 check "no temp files left in secrets/" test "$(ls -A "$box/secrets")" = pane_token
 check ".env is 0600 and the run user's" test "$(stat -c '%a %U' "$box/.env")" = "600 $USER_T"
 check "the token is not in .env" bash -c '! grep -qF "$1" "$2"' _ "$TOKEN" "$box/.env"
+check "site probes off by default" envis 'TELEMETRY_SITES=0'
+
+echo "== the token is accepted under en_US.UTF-8 too (bash's =~ ranges follow the locale)"
+loc=""
+if locale -a 2>/dev/null | grep -qix 'en_US.utf8'; then loc=en_US.UTF-8
+elif [ -d /usr/share/i18n/locales ] && localedef -i en_US -f UTF-8 "$work/en_US.UTF-8" >/dev/null 2>&1; then
+    export LOCPATH="$work"; loc=en_US.UTF-8
+fi
+if [ -n "$loc" ]; then
+    if printf '%s\n' "$TOKEN" | LC_ALL="$loc" LANG="$loc" bash "$box/install.sh" --profile host --pane-url "$URL" --run-user "$USER_T" --token-stdin >"$out" 2>&1; then
+        CHECKS=$((CHECKS + 1))
+    else fail "a real token was refused under $loc" "$(tail -n 6 "$out")"; fi
+    check "under $loc the token is saved" test "$(cat "$box/secrets/pane_token")" = "$TOKEN"
+    unset LOCPATH
+else
+    echo "   (no en_US.UTF-8 locale here; skipped)"
+fi
 
 echo "== --profile gpu with model labels, and a rerun restores a drifted .env"
 printf 'MQTT_HOST=192.168.68.76\nTELEMETRY_NVIDIA=0\nDEBUG=1\n' >"$box/.env"
@@ -54,6 +71,23 @@ check "DEBUG is back to 0" envis 'DEBUG=0'
 check "llama-server labels" envis 'MODEL_SOURCE=llamaserver'
 check "both URLs" envis 'MODEL_API_URL=http://127.0.0.1:1234,http://127.0.0.1:1235'
 check "the earlier token is kept when none is given" test "$(cat "$box/secrets/pane_token")" = "$TOKEN"
+
+echo "== --sites turns the site probes on; a rerun and --reconfigure keep them; --no-sites turns them off"
+run --profile host --pane-url "$URL" --run-user "$USER_T" --sites || fail "--sites failed" "$(tail -n 6 "$out")"
+check "--sites: TELEMETRY_SITES=1" envis 'TELEMETRY_SITES=1'
+check "--sites: it says so" has 'Site probes are on'
+run --profile host --pane-url "$URL" --run-user "$USER_T" || fail "rerun without --sites failed" "$(tail -n 6 "$out")"
+check "a rerun without --sites keeps them on (Errata, OPS-59 Blocker)" envis 'TELEMETRY_SITES=1'
+# --reconfigure (the interactive questions, answered from a file): MQTT none, Pane URL, default name,
+# no NVIDIA, host stats yes, no model labels.
+printf 'none\n%s\n\nn\ny\nnone\n' "$URL" >"$work/answers"
+TELEMETRY_TTY_R="$work/answers" TELEMETRY_TTY_W=/dev/null run --reconfigure --run-user "$USER_T" || fail "--reconfigure failed" "$(tail -n 6 "$out")"
+check "--reconfigure asked its questions (MQTT off now)" envis 'MQTT_HOST='
+check "--reconfigure keeps them on" envis 'TELEMETRY_SITES=1'
+run --profile host --pane-url "$URL" --run-user "$USER_T" --no-sites || fail "--no-sites failed" "$(tail -n 6 "$out")"
+check "--no-sites: TELEMETRY_SITES=0" envis 'TELEMETRY_SITES=0'
+run --profile host --pane-url "$URL" --run-user "$USER_T" || fail "rerun after --no-sites failed" "$(tail -n 6 "$out")"
+check "and a rerun keeps them off" envis 'TELEMETRY_SITES=0'
 
 echo "== --profile vm with ollama labels"
 run --profile vm --pane-url "$URL" --run-user "$USER_T" --models ollama=http://127.0.0.1:11434 || fail "vm profile failed" "$(tail -n 6 "$out")"
@@ -102,6 +136,22 @@ check ".env symlink: the target is untouched" victim_intact
 check ".env symlink: .env is a plain file again" test -f "$box/.env" -a ! -L "$box/.env"
 check ".env symlink: no temp files left" bash -c '! ls -A "$1" | grep -q "^\.env\."' _ "$box"
 
+# A directory planted at secrets/pane_token (the old layout) would swallow the new token: it goes first.
+legacy_secrets
+runuser -u "$USER_T" -- mkdir "$box/secrets/pane_token"
+printf '%s\n' "$TOKEN" | run --profile host --pane-url "$URL" --run-user "$USER_T" --token-stdin \
+    || fail "a token over a planted directory failed" "$(tail -n 6 "$out")"
+check "planted directory: the token is a plain file" test -f "$box/secrets/pane_token" -a ! -L "$box/secrets/pane_token"
+check "planted directory: holding the token" test "$(cat "$box/secrets/pane_token")" = "$TOKEN"
+
+echo "== an install dir the run user owns is refused (as update.sh refuses it), and nothing changes"
+cp "$box/.env" "$work/env.owned"
+chown "$USER_T" "$box"
+if run --profile host --pane-url "$URL" --run-user "$USER_T"; then fail "a run-user-owned install dir was accepted" ""; else CHECKS=$((CHECKS + 1)); fi
+check "owned dir: it says why" has "!!! the install dir isn't root's"
+check "owned dir: .env unchanged" cmp -s "$work/env.owned" "$box/.env"
+chown root "$box"
+
 echo "== bad input is refused and nothing changes"
 cp "$box/.env" "$work/env.before"
 before_tok="$(cat "$box/secrets/pane_token")"
@@ -124,6 +174,8 @@ expect_refused "root as the run user" "!!! --run-user can't be root" '' -- --pro
 expect_refused "a token with spaces" "!!! that isn't a Pane token" "pw_abc def ghi jkl mno pqr" -- --profile host --pane-url "$URL" --token-stdin
 expect_refused "an empty token" "!!! that isn't a Pane token" "" -- --profile host --pane-url "$URL" --token-stdin
 expect_refused "an unknown option" '!!! unknown argument' '' -- --profile host --pane-url "$URL" --force
+expect_refused "--sites without fleet mode" '!!! --sites/--no-sites are for fleet mode' '' -- --sites
+expect_refused "--no-sites without fleet mode" '!!! --sites/--no-sites are for fleet mode' '' -- --no-sites
 check "a refused token is never echoed" bash -c '! grep -q "pw_abc" "$1"' _ "$out"
 
 echo

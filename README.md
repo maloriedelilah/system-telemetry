@@ -63,13 +63,16 @@ above with one line that `add-box.sh` prints. Under the hood it runs:
 
 ```bash
 sudo ./install.sh --profile host|gpu|vm --pane-url http://<pane>:8427 --run-user telemetry --token-stdin \
-    [--models llamaserver=http://127.0.0.1:1234,http://127.0.0.1:1235 | --models ollama=URL]
+    [--models llamaserver=http://127.0.0.1:1234,http://127.0.0.1:1235 | --models ollama=URL] [--sites]
 ```
 
 `host` is CPU/RAM/disk, `gpu` adds NVIDIA, and `vm` is for VMs. MQTT is off in every profile.
 The profile rewrites `.env` each time, so rerunning the same line puts a drifted box back on
 the standard. `--token-stdin` reads the Pane token on stdin and saves it 0400 for the run user.
-Missing `git`, `python3-venv` or `python3-pip` are installed first.
+Missing `git`, `python3-venv` or `python3-pip` are installed first. `--sites` turns on the
+public-site probes (pane only; see Site probes below) and `--no-sites` turns them off; with
+neither, a rerun or `--reconfigure` keeps whatever `.env` already says. Fleet mode needs the install dir to be
+root's, as update.sh does.
 
 Re-run to reconfigure:
 

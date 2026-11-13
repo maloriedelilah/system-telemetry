@@ -17,6 +17,10 @@
 # their own deploy key (OPS-19).
 # ---------------------------------------------------------------------------
 set -Eeuo pipefail
+# Every pattern here ([!-~], [0-9], [a-z]) means ASCII. Under a locale such as en_US.UTF-8, bash's
+# =~ takes ranges from the collation order instead, and [!-~] then refused every real Pane token
+# (Nov 13, the first box after pane). Assigning LC_ALL makes bash switch locale right here.
+export LC_ALL=C
 
 SLUG="maloriedelilah/system-telemetry"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
