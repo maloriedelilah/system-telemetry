@@ -120,6 +120,7 @@ expect_refused "no URL" '!!! not a Pane URL' '' -- --profile host
 expect_refused "an unknown model source" '!!! unknown --models' '' -- --profile host --pane-url "$URL" --models lmstudio=http://x:1
 expect_refused "a bad model URL" '!!! bad model URL' '' -- --profile host --pane-url "$URL" --models 'llamaserver=http://x:1;rm'
 expect_refused "a bad user name" '!!! bad --run-user' '' -- --profile host --pane-url "$URL" --run-user 'Root;x'
+expect_refused "root as the run user" "!!! --run-user can't be root" '' -- --profile host --pane-url "$URL" --run-user root
 expect_refused "a token with spaces" "!!! that isn't a Pane token" "pw_abc def ghi jkl mno pqr" -- --profile host --pane-url "$URL" --token-stdin
 expect_refused "an empty token" "!!! that isn't a Pane token" "" -- --profile host --pane-url "$URL" --token-stdin
 expect_refused "an unknown option" '!!! unknown argument' '' -- --profile host --pane-url "$URL" --force

@@ -271,6 +271,12 @@ if [[ -n "$PROFILE" ]]; then
             "fix the option. Nothing was changed."
         exit 2
     fi
+    # --run-user exists to keep the pusher away from root; root would undo that (Errata, OPS-47 Low).
+    if [[ -n "$RUN_USER_ARG" ]] && id -u "$RUN_USER_ARG" >/dev/null 2>&1 && [[ "$(id -u "$RUN_USER_ARG")" == 0 ]]; then
+        report "--run-user can't be root" "read --run-user" "an unprivileged account, e.g. telemetry" \
+            "'$RUN_USER_ARG' (uid 0)" "use --run-user telemetry (created if missing). Nothing was changed."
+        exit 2
+    fi
 fi
 
 # The token, read now (before anything changes) so a bad paste stops the run cleanly.
