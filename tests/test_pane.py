@@ -161,13 +161,14 @@ def test_to_lines_linux_exact():
 
 
 def test_to_lines_lhm_shape():
-    lines = pane.to_lines(LHM_GPUS, {"0": "none loaded", "3": "qwen3-8b"}, LHM_HOST)
+    lines = pane.to_lines(LHM_GPUS, {"0": "idle", "3": "qwen3-8b"}, LHM_HOST)
     assert lines == [
         r"gpu,gpu=0,name=NVIDIA\ Tesla\ V100-SXM2-16GB temp_c=33,util_percent=0,mem_used_mb=0,"
         r"mem_total_mb=16384,mem_pct=0,power_w=40.1",
         r"gpu,gpu=3,name=Intel\ Arc\ B580\ Graphics mem_used_mb=812.5,mem_total_mb=12288,"
         "mem_pct=6.6,power_w=11",
-        "gpu_model,gpu=3,model=qwen3-8b loaded=1",           # "none loaded" is not a model
+        "gpu_model,gpu=0,model=idle loaded=1",               # an idle card still gets its row
+        "gpu_model,gpu=3,model=qwen3-8b loaded=1",
         r"cpu,cpu=Intel\ Xeon\ E5-2690\ v3\ #0 temp_c=61,load_percent=22.5,power_w=88",
         r"cpu,cpu=Intel\ Xeon\ E5-2690\ v3\ #1 temp_c=58,power_w=79.5",
         "mem used_gb=101.2,total_gb=255.9,used_percent=39.5",
