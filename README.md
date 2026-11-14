@@ -62,11 +62,12 @@ writes `.env`, builds the venv and registers the service: a **systemd timer** on
 above with one line that `add-box.sh` prints. Under the hood it runs:
 
 ```bash
-sudo ./install.sh --profile host|gpu|vm --pane-url http://<pane>:8427 --run-user telemetry --token-stdin \
-    [--models llamaserver=http://127.0.0.1:1234,http://127.0.0.1:1235 | --models ollama=URL]
+sudo ./install.sh --profile host|gpu|vm --pane-url http://<pane>:8427 --run-user telemetry --token-stdin
 ```
 
-`host` is CPU/RAM/disk, `gpu` adds NVIDIA, and `vm` is for VMs. MQTT is off in every profile.
+`host` is CPU/RAM/disk and `vm` is for VMs. GPUs and their loaded models are found on their own
+on any profile (see Loaded-model labels), so `gpu` and `--models` are no longer needed; both are
+still accepted. MQTT is off in every profile.
 The profile rewrites `.env` each time, so rerunning the same line puts a drifted box back on
 the standard. `--token-stdin` reads the Pane token on stdin and saves it 0400 for the run user.
 Missing `git`, `python3-venv` or `python3-pip` are installed first.
@@ -151,31 +152,45 @@ service/            systemd unit/timer + NSSM reference
 
 Each box sets what it runs. The collectors are independent flags:
 
-| machine       | NVIDIA | LHM | LHM_GPUS | MODEL_SOURCE | notes |
-|---------------|:------:|:---:|:--------:|--------------|-------|
-| slimridge     |   1    |  0  |    0     | docker       | Linux, single V100; llama.cpp embed + rerank in Docker (user in `docker` group) |
-| Chonky        |   1    |  0* |    0     | none         | RTX 3090; LHM optional for host temps |
-| Eighty-Eight  |   1    |  1  |    0     | lmstudio     | dual Xeon + 3×V100 + K2200; LHM = host temps only (`llamaserver` fits its two llama-server instances on :1234/:1235) |
-| SilverPancake |   0    |  1  |    1     | lmstudio     | Arc B580 has no nvidia-smi; LHM supplies the GPU |
+| variable | default | meaning |
+|----------|---------|---------|
+| `TELEMETRY_NVIDIA` | `auto` | GPUs from `nvidia-smi` whenever it's installed: nothing to set on a GPU box. `off` turns them off; `1` also complains when `nvidia-smi` is missing. The `0` older installs wrote reads as `auto`. |
+| `TELEMETRY_LHM` | `0` | LibreHardwareMonitor (Windows host temps) |
+| `LHM_GPUS` | `0` | GPUs from LHM too (an Arc card has no `nvidia-smi`) |
+| `TELEMETRY_HOST` | `0` | Linux CPU/RAM/disk (psutil, hwmon) |
+
+| machine       | LHM | LHM_GPUS | notes |
+|---------------|:---:|:--------:|-------|
+| Chonky        |  0* |    0     | RTX 3090; LHM optional for host temps |
+| Eighty-Eight  |  1  |    0     | dual Xeon + 3×V100 + K2200; LHM = host temps only |
+| SilverPancake |  1  |    1     | Arc B580 has no nvidia-smi; LHM supplies the GPU |
 
 `*` flip to 1 whenever you want Chonky's CPU/RAM/disk temps too.
 
-## Model-label sources
+## Loaded-model labels
 
-`MODEL_SOURCE` picks where the "loaded models" label comes from:
+Found on their own; there is nothing to configure. Each cycle `nvidia-smi` lists the processes
+on every card, and each is named:
 
-| source        | reads | `MODEL_API_URL` |
-|---------------|-------|-----------------|
-| `ollama`      | `GET /api/ps` | the Ollama base URL |
-| `lmstudio`    | `GET <MODEL_API_PATH>` (LM Studio's REST API) | the LM Studio base URL |
-| `docker`      | `docker ps` / `docker inspect` (service user in the `docker` group) | unused |
-| `llamaserver` | `GET <url>/v1/models` on each llama.cpp `llama-server` instance, using each `data[].id` | comma-separated base URLs, e.g. `http://127.0.0.1:1234,http://127.0.0.1:1235` |
-| `none`        | VRAM-using compute processes from `nvidia-smi` | unused |
+| on the card | label |
+|-------------|-------|
+| llama.cpp `llama-server` (bare metal, NSSM or Docker) | its `--alias`, else its model file (`-m`, without `.gguf`), else `-hf` repo |
+| Ollama | the models its local API (`/api/ps`) has loaded |
+| vLLM, or anything started with `--model` / `--model-path` | that model |
+| ComfyUI | `busy: ComfyUI` |
+| anything else | `busy: <process>` (`busy: python train.py`) |
+| nothing | `idle` |
+| memory in use but no process listed (WSL; another Windows session) | `busy: process not visible` |
+| a lookup that failed | `unknown: <why>`, with the reason on stderr |
 
-The API-based sources can't tell which card a model sits on, so they report the
-full set against GPU 0. `MODEL_FILTER` (comma-separated substrings) keeps only
-matching labels. With `llamaserver`, an instance that doesn't answer is reported
-on stderr and skipped; the other instances' labels still go out.
+Every card gets a label, so the dashboard has a row per card and never a silent gap. A model
+spread over several cards shows on each of them. Ollama doesn't say which card holds which model,
+so every card running Ollama shows its whole list. Ollama is asked at `http://127.0.0.1:11434`;
+set `MODEL_SOURCE=ollama` and `MODEL_API_URL` only if it listens somewhere else.
+
+`MODEL_FILTER` (comma-separated substrings) keeps only matching model names. `MODEL_SOURCE=off`
+turns labels off, and `MODEL_SOURCE=lmstudio` keeps the LM Studio API adapter (`MODEL_API_URL`,
+`MODEL_API_PATH`). The older sources `none`, `docker`, `llamaserver` and `ollama` all mean auto now.
 
 ## Pane
 

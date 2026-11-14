@@ -100,7 +100,12 @@ HOST = ((os.environ.get("TELEMETRY_HOST_NAME") or "").strip()
 # ---------------------------------------------------------------------------
 # Roles — explicit per machine (replaces inferring LHM from LHM_URL presence)
 # ---------------------------------------------------------------------------
-TELEMETRY_NVIDIA = _flag("TELEMETRY_NVIDIA", "1")   # run nvidia-smi collector
+# GPUs (nvidia-smi): reported whenever nvidia-smi is installed, with no setting needed. "off" turns
+# them off; "1"/"on" also complains when nvidia-smi is missing. Anything else, including the "0" that
+# older installs wrote for the host profile, is "auto": a box that has NVIDIA cards reports them.
+NVIDIA_MODE = (os.environ.get("TELEMETRY_NVIDIA", "auto").strip().lower() or "auto")
+NVIDIA_MODE = {"off": "off", "never": "off", "1": "on", "on": "on", "true": "on"}.get(NVIDIA_MODE, "auto")
+TELEMETRY_NVIDIA = NVIDIA_MODE != "off"             # run the nvidia-smi collector (auto or on)
 TELEMETRY_LHM = _flag("TELEMETRY_LHM", "0")         # run LibreHardwareMonitor reader (Windows)
 LHM_GPUS = _flag("LHM_GPUS", "0")                   # include GPUs from LHM (Arc boxes)
 TELEMETRY_HOST = _flag("TELEMETRY_HOST", "0")       # run psutil host collector (Linux)
@@ -124,11 +129,22 @@ HEARTBEATS_DIR = os.environ.get("HEARTBEATS_DIR", "").strip()
 IS_LINUX = sys.platform.startswith("linux")
 
 # ---------------------------------------------------------------------------
-# Model-name source: ollama | lmstudio | docker | llamaserver | none
+# Loaded-model labels: found on their own (nvidia.read_models). Every process on a card is looked
+# up: llama-server by its --alias/-m, Ollama through its local API, anything else by name. Nothing
+# to configure. "off" turns labels off; "lmstudio" keeps the LM Studio API adapter. Older installs'
+# none / llamaserver / docker / ollama all mean auto now: auto covers each of them per card.
 # ---------------------------------------------------------------------------
-MODEL_SOURCE = os.environ.get("MODEL_SOURCE", "none").lower()
-# llamaserver takes a comma-separated list of base URLs here (one per instance).
+MODEL_SOURCE = (os.environ.get("MODEL_SOURCE", "auto").strip().lower() or "auto")
+if MODEL_SOURCE not in ("off", "lmstudio"):
+    _OLLAMA_SET = MODEL_SOURCE == "ollama"
+    MODEL_SOURCE = "auto"
+else:
+    _OLLAMA_SET = False
 MODEL_API_URL = os.environ.get("MODEL_API_URL", "http://127.0.0.1:11434")
+# Ollama's local API (auto mode): MODEL_API_URL only when the box was set up for Ollama; otherwise
+# Ollama's own default. Other values of MODEL_API_URL were llama-server URLs, no longer needed.
+OLLAMA_URL = (MODEL_API_URL.split(",")[0].strip().rstrip("/") if _OLLAMA_SET and MODEL_API_URL.strip()
+              else "http://127.0.0.1:11434")
 MODEL_API_PATH = os.environ.get("MODEL_API_PATH", "/api/v0/models")
 # Locality filter: comma-separated, case-insensitive substrings. When set, only
 # loaded models whose id contains one of these are reported (LM Studio's `lms
