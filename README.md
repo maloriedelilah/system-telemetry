@@ -154,7 +154,7 @@ Each box sets what it runs. The collectors are independent flags:
 
 | variable | default | meaning |
 |----------|---------|---------|
-| `TELEMETRY_NVIDIA` | `auto` | GPUs from `nvidia-smi` whenever it's installed: nothing to set on a GPU box. `off` turns them off; `1` also complains when `nvidia-smi` is missing. The `0` older installs wrote reads as `auto`. |
+| `TELEMETRY_NVIDIA` | `auto` | GPUs from `nvidia-smi` whenever it's installed: nothing to set on a GPU box. `off` turns them off; `1` also complains when `nvidia-smi` is missing. The `0` older installs wrote reads as `auto`, except with `LHM_GPUS=1`, where `0` still means off (so a card isn't counted twice). |
 | `TELEMETRY_LHM` | `0` | LibreHardwareMonitor (Windows host temps) |
 | `LHM_GPUS` | `0` | GPUs from LHM too (an Arc card has no `nvidia-smi`) |
 | `TELEMETRY_HOST` | `0` | Linux CPU/RAM/disk (psutil, hwmon) |
@@ -178,7 +178,7 @@ on every card, and each is named:
 | Ollama | the models its local API (`/api/ps`) has loaded |
 | vLLM, or anything started with `--model` / `--model-path` | that model |
 | ComfyUI | `busy: ComfyUI` |
-| anything else | `busy: <process>` (`busy: python train.py`) |
+| anything else | `busy: <process>` (`busy: python train.py`): the program name only, never its options |
 | nothing | `idle` |
 | memory in use but no process listed (WSL; another Windows session) | `busy: process not visible` |
 | a lookup that failed | `unknown: <why>`, with the reason on stderr |
@@ -187,6 +187,10 @@ Every card gets a label, so the dashboard has a row per card and never a silent 
 spread over several cards shows on each of them. Ollama doesn't say which card holds which model,
 so every card running Ollama shows its whole list. Ollama is asked at `http://127.0.0.1:11434`;
 set `MODEL_SOURCE=ollama` and `MODEL_API_URL` only if it listens somewhere else.
+
+Labels never carry a process's options: vLLM's model is the first word after `serve` that isn't an
+option, a model URL loses its query string and credentials, and a process that rewrote its title into
+one string is split back into words first. The Ollama lookup has an overall 5 s deadline and a 256 KiB cap.
 
 `MODEL_FILTER` (comma-separated substrings) keeps only matching model names. `MODEL_SOURCE=off`
 turns labels off, and `MODEL_SOURCE=lmstudio` keeps the LM Studio API adapter (`MODEL_API_URL`,

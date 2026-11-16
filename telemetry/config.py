@@ -104,7 +104,12 @@ HOST = ((os.environ.get("TELEMETRY_HOST_NAME") or "").strip()
 # them off; "1"/"on" also complains when nvidia-smi is missing. Anything else, including the "0" that
 # older installs wrote for the host profile, is "auto": a box that has NVIDIA cards reports them.
 NVIDIA_MODE = (os.environ.get("TELEMETRY_NVIDIA", "auto").strip().lower() or "auto")
+_NV_RAW = NVIDIA_MODE
 NVIDIA_MODE = {"off": "off", "never": "off", "1": "on", "on": "on", "true": "on"}.get(NVIDIA_MODE, "auto")
+# One exception to "0 means auto": with LHM_GPUS=1 the box takes its GPUs from LHM, and an explicit 0
+# was how such a box said "not nvidia-smi too". Keep that, or each card would be counted twice.
+if _NV_RAW == "0" and os.environ.get("LHM_GPUS", "0").strip().lower() in ("1", "true", "yes", "on"):
+    NVIDIA_MODE = "off"
 TELEMETRY_NVIDIA = NVIDIA_MODE != "off"             # run the nvidia-smi collector (auto or on)
 TELEMETRY_LHM = _flag("TELEMETRY_LHM", "0")         # run LibreHardwareMonitor reader (Windows)
 LHM_GPUS = _flag("LHM_GPUS", "0")                   # include GPUs from LHM (Arc boxes)

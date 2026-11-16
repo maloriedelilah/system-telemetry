@@ -9,6 +9,7 @@ sys.path.insert(0, ROOT)
 os.environ.pop("MODEL_SOURCE", None)
 os.environ.pop("TELEMETRY_NVIDIA", None)
 from telemetry import nvidia  # noqa: E402
+nvidia._real_http_json = nvidia._http_json   # fake() replaces _http_json; the deadline test needs the real one
 
 UUIDS = "0, GPU-a\n1, GPU-b\n2, GPU-c\n3, GPU-d\n"
 
@@ -115,7 +116,7 @@ def test_vllm_and_docker_llama_server():
 def test_unreadable_command_line_falls_back_to_the_process_name():
     fake([(30, "a", "/usr/bin/mystery-app"), (31, "b", "[Insufficient Permissions]")], {})
     got, _ = run(gpus(2))
-    assert got == {"0": "busy: mystery-app", "1": "busy: pid 31"}, got
+    assert got == {"0": "busy: mystery-app", "1": "busy: process not readable"}, got   # no pid: no new series per restart
 
 
 def test_desktop_processes_are_not_a_workload():
@@ -159,6 +160,92 @@ def test_off_and_no_gpus():
         nvidia.MODEL_SOURCE = "auto"
     fake([], {})
     assert nvidia.read_models([]) == {}
+
+
+def test_vllm_options_before_the_model_never_become_the_label():
+    # Errata B1: `vllm serve --api-key=... MODEL` labelled the key.
+    for argv in (["vllm", "serve", "--api-key=sk-test123", "Qwen/Qwen2.5-7B"],
+                 ["vllm", "serve", "--hf-token", "hf_secret", "--port", "8000", "Qwen/Qwen2.5-7B"],
+                 ["/usr/bin/python3", "-m", "vllm.entrypoints.cli.main", "serve", "--port=8000", "Qwen/Qwen2.5-7B"]):
+        assert nvidia._identify("python3", argv) == ("model", "Qwen2.5-7B"), argv
+    kind, label = nvidia._identify("vllm", ["vllm", "serve", "--api-key", "sk-test123"])
+    assert "sk-test123" not in label, label
+
+
+def test_vllm_engine_worker_is_named_from_its_parent():
+    fake([(60, "a", "VLLM::EngineCore")], {60: ["VLLM::EngineCore"]})
+    old = nvidia._parent_cmdline
+    nvidia._parent_cmdline = lambda pid: ["vllm", "serve", "Qwen/Qwen3-8B"]
+    try:
+        got, _ = run(gpus(1))
+    finally:
+        nvidia._parent_cmdline = old
+    assert got == {"0": "Qwen3-8B"}, got
+
+
+def test_a_model_url_loses_its_query_and_credentials():
+    # Errata L1
+    assert nvidia._identify("koboldcpp", ["koboldcpp", "--model", "https://h/x.gguf?token=SECRET"]) == ("model", "x")
+    assert nvidia._identify("koboldcpp", ["koboldcpp", "--model", "https://user:pw@h/m/y.gguf#frag"]) == ("model", "y")
+    assert nvidia._identify("llama-server", ["llama-server", "-m", "/m/z.gguf?k=v"]) == ("model", "z")
+
+
+def test_a_one_string_title_never_leaks_its_options():
+    # Errata L2: setproctitle-style "python3 server.py --api-key sk-..." as one argv word.
+    args = nvidia._split_title(["/usr/bin/python3 server.py --api-key sk-abc"])
+    assert args == ["/usr/bin/python3", "server.py", "--api-key", "sk-abc"], args
+    kind, label = nvidia._identify("python3", args)
+    assert label == "busy: python3 server.py", label
+    kind, label = nvidia._identify("myd", nvidia._split_title(["myd --token secret"]))
+    assert label == "busy: myd", label
+
+
+def test_a_lone_surrogate_in_a_label_is_replaced():
+    # Errata L4: it made pane.py's encode raise and drop the whole batch.
+    fake([(70, "a", "llama-server")], {70: ["llama-server", "-a", "m\udcff"]})
+    got, _ = run(gpus(1))
+    got["0"].encode("utf-8")   # must not raise
+
+
+def test_http_answers_have_a_deadline_and_a_size_cap():
+    # Errata L3: a local server trickling one byte every few seconds stalled the cycle past the unit timeout.
+    import http.server, threading, time as _t
+    class Slow(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *a): pass
+        def do_GET(self):
+            self.send_response(200); self.send_header("Content-Length", "100000"); self.end_headers()
+            if self.path == "/big":
+                self.wfile.write(b"x" * 100000); return
+            for _ in range(50):
+                try:
+                    self.wfile.write(b" "); self.wfile.flush(); _t.sleep(0.2)
+                except OSError:
+                    return
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Slow)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+    real = nvidia.__dict__.get("_real_http_json")
+    try:
+        t0 = _t.monotonic()
+        try:
+            real(f"http://127.0.0.1:{port}/slow", timeout=1)
+            raise AssertionError("a trickling answer was accepted")
+        except TimeoutError:
+            pass
+        assert _t.monotonic() - t0 < 3, "the deadline did not hold"
+        try:
+            real(f"http://127.0.0.1:{port}/big", max_bytes=1000)
+            raise AssertionError("an oversized answer was accepted")
+        except ValueError:
+            pass
+    finally:
+        srv.shutdown()
+
+
+def test_explicit_zero_with_lhm_gpus_stays_off():
+    # Errata L8: a box taking GPUs from LHM said TELEMETRY_NVIDIA=0 to avoid counting each card twice.
+    assert _config_in_child({"TELEMETRY_NVIDIA": "0", "LHM_GPUS": "1"})[:2] == ["off", "False"]
+    assert _config_in_child({"TELEMETRY_NVIDIA": "auto", "LHM_GPUS": "1"})[:2] == ["auto", "True"]
 
 
 def _config_in_child(env):

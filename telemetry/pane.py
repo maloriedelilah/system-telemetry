@@ -329,7 +329,7 @@ def push(lines):
 
     try:
         req = urllib.request.Request(
-            endpoint, data=("\n".join(lines) + "\n").encode("utf-8"), method="POST",
+            endpoint, data=("\n".join(lines) + "\n").encode("utf-8", "replace"), method="POST",
             headers={"Authorization": f"Bearer {token}",
                      "Content-Type": "text/plain; charset=utf-8"})
         try:
