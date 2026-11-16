@@ -2,7 +2,7 @@
 """Orchestrator / service entrypoint.
 
 Reads role flags from config and runs the enabled collectors:
-  TELEMETRY_NVIDIA -> nvidia.read_gpus + nvidia.read_models
+  TELEMETRY_NVIDIA -> nvidia.read_gpus + nvidia.read_models (auto: whenever nvidia-smi exists)
   TELEMETRY_LHM    -> lhm.read_host_and_gpus (host temps; +GPUs if LHM_GPUS)
   TELEMETRY_HOST   -> linux_host.read_host (Linux psutil/hwmon)
   TELEMETRY_SITES  -> sites.probe_all (public sites' /api/health; Pane output only)
@@ -38,6 +38,7 @@ dbg = config.dbg
 def run_once():
     """One publish cycle. Returns True only if every enabled output succeeded."""
     gpus = nvidia.read_gpus() if config.TELEMETRY_NVIDIA else []
+    nvidia_gpus = list(gpus)   # model labels are looked up for these; LHM's GPUs have none
 
     lhm_gpus, host = ([], None)
     if config.TELEMETRY_LHM:
@@ -90,7 +91,7 @@ def run_once():
     dbg(f"found {len(gpus)} GPU(s):", [g["name"] for g in gpus],
         "| host stats:", bool(host))
 
-    models = nvidia.read_models(gpus) if gpus else {}
+    models = nvidia.read_models(nvidia_gpus) if nvidia_gpus else {}
     dbg("model labels:", models)
 
     if not config.PANE_URL and not config.MQTT_HOST:

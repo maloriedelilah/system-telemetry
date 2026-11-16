@@ -93,12 +93,12 @@ finish() {
         # As the venv's owner, never as root through a venv another user can write (Errata, OPS-19 L5).
         owner="$(stat -c %U "$INSTALL_DIR/venv")"
         if [[ "$owner" == root ]]; then
-            "$py" -m pip install --quiet -r "$INSTALL_DIR/requirements.txt"
+            "$py" -m pip install --quiet --no-cache-dir -r "$INSTALL_DIR/requirements.txt"
         else
-            runuser -u "$owner" -- "$py" -m pip install --quiet -r "$INSTALL_DIR/requirements.txt"
+            runuser -u "$owner" -- "$py" -m pip install --quiet --no-cache-dir -r "$INSTALL_DIR/requirements.txt"
         fi
     else
-        "$py" -m pip install --quiet -r "$INSTALL_DIR/requirements.txt"
+        "$py" -m pip install --quiet --no-cache-dir -r "$INSTALL_DIR/requirements.txt"
     fi
     SO_FAR="checked out $tag; deps refreshed; the service isn't restarted yet"
     if [[ "$OS" == linux ]]; then

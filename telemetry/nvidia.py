@@ -1,13 +1,18 @@
-"""NVIDIA GPU metrics (nvidia-smi) and loaded-model-name adapters.
+"""NVIDIA GPU metrics (nvidia-smi) and loaded-model labels.
 
-read_gpus()   -> list of per-GPU metric dicts (util, mem, temp, power)
-read_models() -> {gpu_index: "model1, model2"} from ollama | lmstudio | docker | llamaserver | nvidia-smi
+read_gpus()       -> list of per-GPU metric dicts (util, mem, temp, power)
+read_models(gpus) -> {gpu_index: label} for every GPU, found on its own (see read_models)
 """
 
 import json
 import os
+import re
+import shlex
+import shutil
 import subprocess
 import sys
+import time
+import urllib.parse
 import urllib.request
 
 from . import config
@@ -16,6 +21,14 @@ MODEL_SOURCE = config.MODEL_SOURCE
 MODEL_API_URL = config.MODEL_API_URL
 MODEL_API_PATH = config.MODEL_API_PATH
 MODEL_FILTER = config.MODEL_FILTER
+OLLAMA_URL = config.OLLAMA_URL
+
+# Labels for a card with nothing identifiable on it. "idle" and the "unknown: ..." forms are
+# reported to Pane like any label, so a card is never silently missing from the model table.
+IDLE = "idle"
+# A card holding this much memory with no process listed is busy with something nvidia-smi can't
+# show (WSL lists no processes; Windows can hide another session's). Below it: a desktop's share.
+HIDDEN_BUSY_MB = 2048
 
 
 def _num(s):
@@ -27,24 +40,33 @@ def _num(s):
         return s
 
 
+def _smi(*args):
+    # errors="replace": one process with a non-UTF-8 name must not turn every card into unknown.
+    return subprocess.check_output(["nvidia-smi", *args], text=True, errors="replace", timeout=15)
+
+
 # ---------------------------------------------------------------------------
 # Hardware metrics
 # ---------------------------------------------------------------------------
 def read_gpus():
-    """Return list of dicts, one per GPU, with hardware metrics."""
+    """Return list of dicts, one per GPU, with hardware metrics.
+
+    No nvidia-smi on the box: [] and nothing said, unless TELEMETRY_NVIDIA=1 asked for GPUs. Any
+    other failure is reported: on a box with nvidia-smi it usually means the driver broke (a kernel
+    update without its module)."""
+    if config.NVIDIA_MODE == "auto" and not shutil.which("nvidia-smi"):
+        return []
     fields = [
         "index", "name", "utilization.gpu", "memory.used",
         "memory.total", "temperature.gpu", "power.draw",
     ]
-    query = ",".join(fields)
     try:
-        out = subprocess.check_output(
-            ["nvidia-smi", f"--query-gpu={query}",
-             "--format=csv,noheader,nounits"],
-            text=True, timeout=15,
-        )
-    except (subprocess.SubprocessError, FileNotFoundError) as e:
-        print(f"nvidia-smi failed: {e}", file=sys.stderr)
+        out = _smi(f"--query-gpu={','.join(fields)}", "--format=csv,noheader,nounits")
+    except (subprocess.SubprocessError, OSError) as e:
+        config.report("nvidia-smi failed", "nvidia-smi --query-gpu", "one line per GPU",
+                      f"{type(e).__name__}: {e}",
+                      "run nvidia-smi on this box; if it can't talk to the driver, the NVIDIA kernel "
+                      "module needs rebuilding (dkms status) or the box a reboot. No GPU data this cycle.")
         return []
 
     gpus = []
@@ -73,28 +95,51 @@ def read_gpus():
 
 
 # ---------------------------------------------------------------------------
-# Loaded-model names (per-host adapter)
+# Loaded-model labels
 # ---------------------------------------------------------------------------
 def read_models(gpus):
-    """Return {gpu_index: 'model1, model2'} mapping. Best-effort; never raises."""
+    """Return {gpu_index: label} for every NVIDIA GPU in gpus. Best-effort; never raises.
+
+    auto (the default): nvidia-smi lists the processes on each card; each one is named by
+    _identify(): llama-server by its --alias or model file, Ollama through its local API, vLLM and
+    others by --model, ComfyUI by name, anything else as "busy: <process>". A card with nothing on
+    it is "idle". When a lookup fails the card says "unknown: <why>" instead of going missing.
+    lmstudio: LM Studio's API, as before. off: no labels."""
     try:
-        if MODEL_SOURCE == "ollama":
-            return _models_ollama(gpus)
+        if MODEL_SOURCE == "off":
+            return {}
         if MODEL_SOURCE == "lmstudio":
             return _models_lmstudio(gpus)
-        if MODEL_SOURCE == "docker":
-            return _models_docker(gpus)
-        if MODEL_SOURCE == "llamaserver":
-            return _models_llamaserver(gpus)
-        return _models_from_nvidia_smi(gpus)
+        return _models_auto(gpus)
     except Exception as e:  # never let model lookup break the hardware metrics
-        print(f"model lookup failed: {e}", file=sys.stderr)
-        return {}
+        config.report("model lookup failed", "read the loaded models", "a label per GPU",
+                      f"{type(e).__name__}: {e}", "this is a bug in nvidia.py; GPU metrics still go out.")
+        return {g["index"]: f"unknown: {type(e).__name__}" for g in gpus}
 
 
-def _http_json(url, timeout=10):
+HTTP_DEADLINE_S = 5         # whole request, not per read: a slow local server can't stall the cycle
+HTTP_MAX_BYTES = 256 * 1024  # an /api/ps or /v1/models answer is a few KiB
+
+
+def _http_json(url, timeout=HTTP_DEADLINE_S, max_bytes=HTTP_MAX_BYTES):
+    """GET url and parse JSON, within one overall deadline and a size cap. Raises on either.
+    The deadline is checked between reads and each read waits at most `timeout`, so the worst case is
+    about twice the deadline, well under the unit's TimeoutStartSec."""
+    end = time.monotonic() + timeout
+    chunks, got = [], 0
     with urllib.request.urlopen(url, timeout=timeout) as r:
-        return json.loads(r.read().decode())
+        while True:
+            left = end - time.monotonic()
+            if left <= 0:
+                raise TimeoutError(f"no complete answer within {timeout} s")
+            chunk = r.read1(min(16384, max_bytes + 1 - got))   # read1: whatever has arrived, not a full 16 KiB
+            if not chunk:
+                break
+            chunks.append(chunk)
+            got += len(chunk)
+            if got > max_bytes:
+                raise ValueError(f"answer over {max_bytes} bytes")
+    return json.loads(b"".join(chunks).decode("utf-8", "replace"))
 
 
 def _keep_local(names):
@@ -104,177 +149,237 @@ def _keep_local(names):
     return [n for n in names if any(sub in n.lower() for sub in MODEL_FILTER)]
 
 
-def _models_ollama(gpus):
-    """Ollama /api/ps lists currently-loaded models. Ollama doesn't expose which
-    physical GPU index a model sits on, so on a single-GPU box we attribute all
-    loaded models to GPU 0. (slimridge is single-V100, so this is correct.)"""
-    data = _http_json(f"{MODEL_API_URL}/api/ps")
-    names = _keep_local([m.get("name", "?") for m in data.get("models", [])])
-    label = ", ".join(names) if names else "none loaded"
-    return {gpus[0]["index"]: label} if gpus else {}
-
-
 def _models_lmstudio(gpus):
-    """LM Studio lists loaded models via its REST API. Like Ollama it doesn't map
-    model->physical GPU index, so we report the full loaded set against GPU 0.
-    MODEL_FILTER strips out models that `lms link` surfaces from other boxes."""
+    """LM Studio lists loaded models via its REST API. It doesn't map model->physical GPU index,
+    so the loaded set is reported against GPU 0. MODEL_FILTER strips out models that `lms link`
+    surfaces from other boxes."""
     data = _http_json(f"{MODEL_API_URL}{MODEL_API_PATH}")
     loaded = _keep_local([m.get("id", "?") for m in data.get("data", [])
                           if m.get("state") == "loaded"])
-    label = ", ".join(loaded) if loaded else "none loaded"
+    label = ", ".join(loaded) if loaded else IDLE
     return {gpus[0]["index"]: label} if gpus else {}
 
 
-def _models_llamaserver(gpus):
-    """llama.cpp `llama-server` instances (Eighty-Eight runs two under NSSM, on
-    :1234 and :1235). MODEL_API_URL is a comma-separated list of base URLs; each
-    one's GET <url>/v1/models lists what it serves in data[].id. Like the
-    ollama/lmstudio adapters there is no model->GPU mapping, so every label is
-    reported against GPU 0. MODEL_FILTER applies to the ids.
+# Desktop and shell processes Windows lists on a card (WDDM). Not a workload.
+_IGNORE = {
+    "explorer", "searchhost", "startmenuexperiencehost", "shellexperiencehost",
+    "windowsterminal", "phoneexperiencehost", "dwm", "chrome", "msedge", "firefox",
+    "code", "docker desktop", "textinputhost", "widgets", "xorg", "gnome-shell",
+}
+_NO_NAME = {"[insufficient permissions]", "[n/a]", ""}
 
-    One instance being down must not hide the others' labels: it is reported in
-    the house format and skipped. If every instance fails, returns {} (the
-    callers show "unknown")."""
-    urls = [u.strip().rstrip("/") for u in MODEL_API_URL.split(",") if u.strip()]
-    names, answered = [], 0
-    for url in urls:
-        endpoint = f"{url}/v1/models"
-        try:
-            data = _http_json(endpoint)
-            ids = [str(m.get("id", "?")) for m in data.get("data", [])]
-        except Exception as e:
-            config.report(
-                "llama-server model lookup failed",
-                f"GET {endpoint}",
-                "200 with a JSON body {\"data\": [{\"id\": ...}]}",
-                f"{type(e).__name__}: {e}",
-                "check the llama-server is running and listening on that port "
-                "(NSSM service status), and that MODEL_API_URL lists each base "
-                "URL, e.g. http://127.0.0.1:1234,http://127.0.0.1:1235. "
-                "The other instances' labels are still reported.")
+
+def _compute_apps():
+    """[(pid, gpu_index, process_name)] from nvidia-smi. Raises if nvidia-smi fails."""
+    uuid_to_idx = {}
+    for line in _smi("--query-gpu=index,gpu_uuid", "--format=csv,noheader").strip().splitlines():
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) >= 2:
+            uuid_to_idx[parts[1]] = parts[0]
+    apps = []
+    out = _smi("--query-compute-apps=pid,gpu_uuid,process_name", "--format=csv,noheader")
+    for line in out.strip().splitlines():
+        parts = [p.strip() for p in line.split(",", 2)]   # a Windows path may hold a comma
+        if len(parts) < 3:
             continue
-        answered += 1
-        names += ids
-    if not answered:
-        return {}
-    names = _keep_local(names)
-    label = ", ".join(names) if names else "none loaded"
-    return {gpus[0]["index"]: label} if gpus else {}
+        idx = uuid_to_idx.get(parts[1])
+        try:
+            pid = int(parts[0])
+        except ValueError:
+            pid = None
+        if idx is not None:
+            apps.append((pid, idx, parts[2]))
+    return apps
 
 
-def _model_arg(args):
-    """The model file named by -m / --model (or --model=...) in a container's
-    command line, as a short label: basename without .gguf. None if absent."""
-    for i, a in enumerate(args):
-        if a in ("-m", "--model") and i + 1 < len(args):
-            path = args[i + 1]
-            break
-        if a.startswith("--model="):
-            path = a.split("=", 1)[1]
-            break
-    else:
+def _cmdline(pid):
+    """The process's argument list, or None when it can't be read (gone, or not ours to see).
+    A process that rewrote its title into one string ("python3 server.py --flag x") is split back
+    into words, so nothing after the program name ends up in a label by accident."""
+    if pid is None:
         return None
-    name = os.path.basename(path)
+    args = None
+    if sys.platform.startswith("linux"):
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                raw = f.read()
+        except OSError:
+            return None
+        args = [a.decode("utf-8", "replace") for a in raw.split(b"\0") if a]
+    else:
+        try:
+            import psutil
+            args = [str(a).encode("utf-8", "replace").decode("utf-8") for a in psutil.Process(pid).cmdline()]
+        except Exception:
+            return None
+    return _split_title(args) or None
+
+
+def _split_title(args):
+    """A one-string title ("python3 server.py --api-key k") back into words; anything else as is."""
+    if len(args) == 1 and " " in args[0].strip():
+        try:
+            return shlex.split(args[0], posix=not sys.platform.startswith("win"))
+        except ValueError:
+            return args[0].split()
+    return args
+
+
+def _parent_cmdline(pid):
+    """The parent's argument list (Linux), for a worker that only names itself (VLLM::EngineCore)."""
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            ppid = next(int(line.split()[1]) for line in f if line.startswith("PPid:"))
+    except (OSError, StopIteration, ValueError):
+        return None
+    return _cmdline(ppid) if ppid > 1 else None
+
+
+def _arg(args, *names):
+    """The value after any of names (-m x, --model x, --model=x), or None."""
+    for i, a in enumerate(args):
+        for n in names:
+            if a == n and i + 1 < len(args):
+                return args[i + 1]
+            if n.startswith("--") and a.startswith(n + "="):
+                return a.split("=", 1)[1]
+    return None
+
+
+def _short_model(path):
+    """A model path, URL or repo as a short label: basename without .gguf. A URL's query string,
+    fragment and user:password are dropped first; they can hold a token."""
+    p = str(path)
+    if "://" in p:
+        u = urllib.parse.urlsplit(p)
+        p = u.path or u.hostname or ""
+    else:
+        p = p.split("?", 1)[0].split("#", 1)[0]
+    name = os.path.basename(p.rstrip("/\\")) or p
     return name[:-5] if name.lower().endswith(".gguf") else name
 
 
-def _models_docker(gpus):
-    """Model servers running in Docker containers (llama.cpp llama-server on
-    slimridge), whose APIs have no host port. Reads the running containers with
-    the docker CLI — the service user must be in the `docker` group — and labels
-    each one that names a model file (-m / --model) as "<model> (<service>)",
-    where <service> is the compose service name (or the container name).
-
-    GPU attribution: a container that requests specific devices
-    (HostConfig.DeviceRequests[].DeviceIDs, i.e. compose `device_ids`) is shown on
-    those GPU indexes; one that asks for all GPUs, or doesn't say, is shown on
-    GPU 0, like the ollama/lmstudio adapters. MODEL_FILTER applies to the labels."""
-    ids = subprocess.check_output(["docker", "ps", "-q"], text=True, timeout=15).split()
-    if not ids:
-        return {g["index"]: "none loaded" for g in gpus}
-    raw = subprocess.check_output(["docker", "inspect", *ids], text=True, timeout=15)
-    per_gpu = {}
-    default_idx = gpus[0]["index"] if gpus else "0"
-    known = {g["index"] for g in gpus}
-    for c in json.loads(raw):
-        cfg = c.get("Config") or {}
-        args = list(c.get("Args") or []) or list(cfg.get("Cmd") or [])
-        model = _model_arg(args)
-        if not model:
-            continue
-        labels = cfg.get("Labels") or {}
-        svc = labels.get("com.docker.compose.service") or c.get("Name", "").lstrip("/")
-        label = f"{model} ({svc})" if svc else model
-        if not _keep_local([label]):
-            continue
-        idxs = []
-        for req in (c.get("HostConfig") or {}).get("DeviceRequests") or []:
-            idxs += [str(d) for d in (req.get("DeviceIDs") or []) if str(d) in known]
-        for idx in idxs or [default_idx]:
-            per_gpu.setdefault(idx, []).append(label)
-    return {g["index"]: ", ".join(sorted(per_gpu.get(g["index"], []))) or "none loaded"
-            for g in gpus}
-
-
-def _models_from_nvidia_smi(gpus):
-    """Fallback: no serving API. Report VRAM-consuming compute processes per GPU.
-    Filters out OS/desktop noise and permission-denied entries (common on Windows).
-    For boxes like Chonky (ComfyUI loads per-job) this answers 'is something
-    actually using the card'."""
+def _positional_after(args, word):
+    """The first argument after `word` that isn't an option (or an option's value), or None.
+    `vllm serve --api-key=k --port 8000 MODEL` gives MODEL, never the key or the port."""
     try:
-        out = subprocess.check_output(
-            ["nvidia-smi",
-             "--query-compute-apps=gpu_uuid,process_name,used_memory",
-             "--format=csv,noheader,nounits"],
-            text=True, timeout=15,
-        )
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return {}
+        i = args.index(word) + 1
+    except ValueError:
+        return None
+    while i < len(args):
+        a = args[i]
+        if a.startswith("-"):
+            # --opt=value is one word; --opt value is two, unless the next word is itself an option
+            if "=" not in a and i + 1 < len(args) and not args[i + 1].startswith("-"):
+                i += 2
+                continue
+            i += 1
+            continue
+        return a
+    return None
 
+
+def _base(name):
+    b = os.path.basename(str(name).replace("\\", "/")).lower()
+    return b[:-4] if b.endswith(".exe") else b
+
+
+def _identify(pname, args):
+    """(kind, label) for one GPU process. kind is "ollama" (label comes from its API), "model" or
+    "busy"."""
+    pb = _base(pname)
+    a0 = _base(args[0]) if args else ""
+    argv = args or []
+    if "ollama" in pb or "ollama" in a0:
+        return "ollama", None
+    if "llama" in pb or "llama" in a0:                       # llama-server, llama-box, llama-cli
+        alias = _arg(argv, "-a", "--alias")
+        model = alias or _arg(argv, "-m", "--model") or _arg(argv, "-hf", "--hf-repo")
+        if model:
+            return "model", alias.split(",")[0].strip() if alias else _short_model(model)
+        return "busy", f"busy: {a0 or pb}"
+    if any("vllm" in a.lower() for a in argv):
+        model = _arg(argv, "--model")
+        if not model or model.startswith("-"):
+            model = _positional_after(argv, "serve")
+        if model and not model.startswith("-"):
+            return "model", _short_model(model)
+    # For python, -m names a module (python -m comfy...), not a model.
+    flags = ("--model", "--model-path") if a0.startswith("python") or pb.startswith("python") \
+        else ("-m", "--model", "--model-path")
+    model = _arg(argv, *flags)
+    if model and not model.startswith("-") and not model.endswith(".py"):
+        return "model", _short_model(model)
+    if any("comfyui" in a.lower() for a in argv):
+        return "busy", "busy: ComfyUI"
+    # Only the program's own name (and a python script's file name): never its options, which can hold keys.
+    script = next((os.path.basename(a) for a in argv[1:] if a.endswith(".py") and not a.startswith("-")), None)
+    name = (a0 or pb or "process").split()[0]
+    return "busy", f"busy: {name} {script}" if script and name.startswith("python") else f"busy: {name}"
+
+
+def _ollama_models():
+    """Names of the models Ollama has loaded, from its local API; raises if it doesn't answer."""
+    data = _http_json(f"{OLLAMA_URL}/api/ps")
+    return [str(m.get("name", "?")) for m in data.get("models", [])]
+
+
+def _models_auto(gpus):
+    if not gpus:
+        return {}
     try:
-        uuid_out = subprocess.check_output(
-            ["nvidia-smi", "--query-gpu=index,gpu_uuid",
-             "--format=csv,noheader"],
-            text=True, timeout=15,
-        )
-    except (subprocess.SubprocessError, FileNotFoundError):
-        return {}
-    uuid_to_idx = {}
-    for line in uuid_out.strip().splitlines():
-        idx, uuid = [p.strip() for p in line.split(",")]
-        uuid_to_idx[uuid] = idx
+        apps = _compute_apps()
+    except (subprocess.SubprocessError, OSError) as e:
+        config.report("can't list GPU processes", "nvidia-smi --query-compute-apps",
+                      "the processes on each card", f"{type(e).__name__}: {e}",
+                      "run nvidia-smi on this box. Each card shows as unknown until it answers.")
+        return {g["index"]: "unknown: nvidia-smi failed" for g in gpus}
 
-    IGNORE = {
-        "explorer.exe", "searchhost.exe", "startmenuexperiencehost.exe",
-        "shellexperiencehost.exe", "windowsterminal.exe", "phoneexperiencehost.exe",
-        "dwm.exe", "chrome.exe", "msedge.exe", "code.exe", "docker desktop.exe",
-        "[insufficient permissions]", "[n/a]",
-    }
+    per_gpu = {g["index"]: [] for g in gpus}
+    ollama_on = set()
+    for pid, idx, pname in apps:
+        if idx not in per_gpu:
+            continue
+        if _base(pname) in _IGNORE or (pname.strip().lower() in _NO_NAME and pid is None):
+            continue
+        args = _cmdline(pid)
+        if not args and pname.strip().lower() in _NO_NAME:
+            per_gpu[idx].append("busy: process not readable")   # not the pid: a new series per restart
+            continue
+        if args and _base(args[0]).startswith("vllm::"):
+            # vLLM V1's engine worker retitles itself VLLM::EngineCore; the model is on its parent's line.
+            args = _parent_cmdline(pid) or args
+        kind, label = _identify(pname, args)
+        if kind == "ollama":
+            ollama_on.add(idx)
+        elif label:
+            per_gpu[idx].append(label)
 
-    per_gpu = {}
-    for line in out.strip().splitlines():
-        if not line.strip():
-            continue
-        parts = [p.strip() for p in line.split(",")]
-        if len(parts) < 3:
-            continue
-        uuid, pname, mem = parts[0], parts[1], parts[2]
-        idx = uuid_to_idx.get(uuid)
-        if idx is None:
-            continue
-        short = os.path.basename(pname)
-        if short.lower() in IGNORE:
-            continue
+    if ollama_on:
         try:
-            mem_i = int(float(mem))
-        except (ValueError, TypeError):
-            continue
-        if mem_i <= 0:
-            continue
-        per_gpu.setdefault(idx, []).append(f"{short} ({mem_i}MiB)")
+            names = _ollama_models()
+            labels = names or ["ollama (no model loaded)"]
+        except Exception as e:
+            config.report("Ollama didn't answer", f"GET {OLLAMA_URL}/api/ps",
+                          "the models Ollama has loaded", f"{type(e).__name__}: {e}",
+                          "check `ollama ps` on this box; if Ollama listens elsewhere, set MODEL_SOURCE=ollama "
+                          "and MODEL_API_URL to its address. Its cards show as unknown meanwhile.")
+            labels = ["unknown: Ollama API"]
+        # Ollama doesn't say which card a model sits on: every card running Ollama gets the list.
+        for idx in ollama_on:
+            per_gpu[idx] += labels
 
     result = {}
-    for idx in {g["index"] for g in gpus}:
-        procs = per_gpu.get(idx, [])
-        result[idx] = ", ".join(procs) if procs else "idle / no compute job"
+    by_idx = {g["index"]: g for g in gpus}
+    clean = lambda lb: str(lb).encode("utf-8", "replace").decode("utf-8")   # a lone surrogate can't be sent
+    for idx, labels in per_gpu.items():
+        labels = [lb for lb in labels if lb.startswith(("busy:", "unknown:")) or _keep_local([lb])]
+        if labels:
+            result[idx] = clean(", ".join(sorted(set(labels))))
+            continue
+        used = by_idx[idx].get("mem_used")
+        if isinstance(used, (int, float)) and used >= HIDDEN_BUSY_MB:
+            result[idx] = "busy: process not visible"
+        else:
+            result[idx] = IDLE
     return result

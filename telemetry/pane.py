@@ -44,9 +44,10 @@ from . import config
 
 dbg = config.dbg
 
-# "nothing is loaded" placeholders that nvidia.read_models() uses as labels; they
-# are not models, so they get no gpu_model series.
-_NO_MODEL = {"none loaded", "idle / no compute job", "unknown", ""}
+# Every card's label is sent, "idle", "busy: ..." and "unknown: ..." included, so the dashboard's
+# model table has a row per card and a gap means the box stopped reporting. Only an empty label
+# (nothing looked up for that index) is skipped.
+_NO_MODEL = {""}
 
 _mode_warned = False
 
@@ -328,7 +329,7 @@ def push(lines):
 
     try:
         req = urllib.request.Request(
-            endpoint, data=("\n".join(lines) + "\n").encode("utf-8"), method="POST",
+            endpoint, data=("\n".join(lines) + "\n").encode("utf-8", "replace"), method="POST",
             headers={"Authorization": f"Bearer {token}",
                      "Content-Type": "text/plain; charset=utf-8"})
         try:
