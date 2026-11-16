@@ -4,16 +4,16 @@ read_gpus()       -> list of per-GPU metric dicts (util, mem, temp, power)
 read_models(gpus) -> {gpu_index: label} for every GPU, found on its own (see read_models)
 """
 
+import http.client
 import json
 import os
-import re
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
-import time
+import threading
 import urllib.parse
-import urllib.request
 
 from . import config
 
@@ -123,22 +123,59 @@ HTTP_MAX_BYTES = 256 * 1024  # an /api/ps or /v1/models answer is a few KiB
 
 def _http_json(url, timeout=HTTP_DEADLINE_S, max_bytes=HTTP_MAX_BYTES):
     """GET url and parse JSON, within one overall deadline and a size cap. Raises on either.
-    The deadline is checked between reads and each read waits at most `timeout`, so the worst case is
-    about twice the deadline, well under the unit's TimeoutStartSec."""
-    end = time.monotonic() + timeout
-    chunks, got = [], 0
-    with urllib.request.urlopen(url, timeout=timeout) as r:
+
+    The deadline covers the whole exchange: connecting, the status line and headers, and the body.
+    A timer shuts the socket down when it runs out, which ends any read that is waiting, so a server
+    trickling its headers can't hold the cycle (Errata L9 on #12). Plain http.client, not urlopen:
+    these are local APIs, so no proxy and no redirects."""
+    u = urllib.parse.urlsplit(url)
+    if u.scheme not in ("http", "https") or not u.hostname:
+        raise ValueError(f"not an http(s) URL: {url!r}")
+    cls = http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection
+    conn = cls(u.hostname, u.port, timeout=timeout)
+    expired = threading.Event()
+
+    def expire():
+        expired.set()
+        sock = conn.sock
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def check():
+        if expired.is_set():
+            raise TimeoutError(f"no complete answer within {timeout} s")
+
+    timer = threading.Timer(timeout, expire)
+    timer.daemon = True
+    timer.start()
+    try:
+        conn.connect()
+        check()   # the timer may have fired before the socket existed, so it couldn't shut it
+        conn.request("GET", (u.path or "/") + (f"?{u.query}" if u.query else ""),
+                     headers={"Accept": "application/json"})
+        r = conn.getresponse()
+        check()
+        if r.status != 200:
+            raise ValueError(f"HTTP {r.status}")
+        chunks, got = [], 0
         while True:
-            left = end - time.monotonic()
-            if left <= 0:
-                raise TimeoutError(f"no complete answer within {timeout} s")
             chunk = r.read1(min(16384, max_bytes + 1 - got))   # read1: whatever has arrived, not a full 16 KiB
+            check()
             if not chunk:
                 break
             chunks.append(chunk)
             got += len(chunk)
             if got > max_bytes:
                 raise ValueError(f"answer over {max_bytes} bytes")
+    except (OSError, http.client.HTTPException):
+        check()   # a read cut off by the timer is a timeout, not a broken server
+        raise
+    finally:
+        timer.cancel()
+        conn.close()
     return json.loads(b"".join(chunks).decode("utf-8", "replace"))
 
 
@@ -259,9 +296,23 @@ def _short_model(path):
     return name[:-5] if name.lower().endswith(".gguf") else name
 
 
-def _positional_after(args, word):
+# vLLM options that take no value, so the word after one is the model, not its value. Only flags
+# known to be valueless belong here: a flag wrongly listed would hand its value (maybe a key) to the label.
+_VLLM_SWITCHES = {
+    "--trust-remote-code", "--enforce-eager", "--enable-prefix-caching", "--no-enable-prefix-caching",
+    "--enable-chunked-prefill", "--no-enable-chunked-prefill", "--disable-log-requests",
+    "--disable-log-stats", "--enable-auto-tool-choice", "--disable-custom-all-reduce", "--enable-lora",
+    "--skip-tokenizer-init", "--disable-sliding-window", "--disable-frontend-multiprocessing",
+    "--enable-sleep-mode", "--headless", "--disable-fastapi-docs", "--enable-prompt-tokens-details",
+    "--enable-server-load-tracking", "--return-tokens-as-token-ids", "--enable-expert-parallel",
+    "--disable-mm-preprocessor-cache", "--async-scheduling",
+}
+
+
+def _positional_after(args, word, switches=_VLLM_SWITCHES):
     """The first argument after `word` that isn't an option (or an option's value), or None.
-    `vllm serve --api-key=k --port 8000 MODEL` gives MODEL, never the key or the port."""
+    `vllm serve --api-key=k --port 8000 MODEL` gives MODEL, never the key or the port, and
+    `vllm serve --trust-remote-code MODEL` gives MODEL because that flag takes no value."""
     try:
         i = args.index(word) + 1
     except ValueError:
@@ -270,13 +321,18 @@ def _positional_after(args, word):
         a = args[i]
         if a.startswith("-"):
             # --opt=value is one word; --opt value is two, unless the next word is itself an option
-            if "=" not in a and i + 1 < len(args) and not args[i + 1].startswith("-"):
+            if "=" not in a and a not in switches and i + 1 < len(args) and not args[i + 1].startswith("-"):
                 i += 2
                 continue
             i += 1
             continue
         return a
     return None
+
+
+def _first_word(name):
+    """A program name up to its first space: a spaced argv[0] can carry options (Errata L10 on #12)."""
+    return (str(name).split() or ["process"])[0]
 
 
 def _base(name):
@@ -297,7 +353,7 @@ def _identify(pname, args):
         model = alias or _arg(argv, "-m", "--model") or _arg(argv, "-hf", "--hf-repo")
         if model:
             return "model", alias.split(",")[0].strip() if alias else _short_model(model)
-        return "busy", f"busy: {a0 or pb}"
+        return "busy", f"busy: {_first_word(a0 or pb)}"
     if any("vllm" in a.lower() for a in argv):
         model = _arg(argv, "--model")
         if not model or model.startswith("-"):
@@ -314,7 +370,7 @@ def _identify(pname, args):
         return "busy", "busy: ComfyUI"
     # Only the program's own name (and a python script's file name): never its options, which can hold keys.
     script = next((os.path.basename(a) for a in argv[1:] if a.endswith(".py") and not a.startswith("-")), None)
-    name = (a0 or pb or "process").split()[0]
+    name = _first_word(a0 or pb)
     return "busy", f"busy: {name} {script}" if script and name.startswith("python") else f"busy: {name}"
 
 
