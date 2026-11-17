@@ -35,6 +35,8 @@ printf 'release 1.1.0\n' >"$origin/release.txt"
 # Nor one with a leading zero, though it's on main and sorts newest (OPS-54).
 "${G[@]}" -C "$origin" tag v9.0.08 v1.1.0
 export TELEMETRY_REPO="$origin" TELEMETRY_SKIP_SERVICE=1
+# First-seen records and the trusted signers live outside the checkout; keep the tests' own.
+export TELEMETRY_STATE_DIR="$work/state" TELEMETRY_ALLOWED_SIGNERS="$work/no-signers-yet"
 
 # A box from the tarball days: v1.0.0's files, no .git, plus its own config and secrets.
 box="$work/box"
@@ -100,8 +102,14 @@ bash "$box/update.sh" >"$out" 2>&1 || fail "the rerun after an unfinished finish
 check "it finishes instead of saying it's already there" has "last finish (pip, restart) didn't complete"
 check "and records it" test "$(cat "$box/.git/telemetry-finished")" = v1.1.0
 
-echo "== update.sh: a named tag"
-bash "$box/update.sh" v1.0.0 >"$out" 2>&1 || fail "update.sh v1.0.0 failed" "$(tail -n 8 "$out")"
+echo "== update.sh: an older named tag needs --rollback (OPS-75)"
+bash "$box/update.sh" v1.0.0 >"$out" 2>&1 && fail "a downgrade ran without --rollback" "" || CHECKS=$((CHECKS + 1))
+check "it says the tag is older" has '!!! v1.0.0 is older than this box'"'"'s v1.1.0'
+check "and how to go back on purpose" has 'update.sh --rollback v1.0.0'
+check "it's still at v1.1.0" test "$(at)" = v1.1.0
+bash "$box/update.sh" --rollback >"$out" 2>&1 && fail "--rollback without a tag ran" "" || CHECKS=$((CHECKS + 1))
+check "--rollback needs a tag" has '!!! --rollback needs a tag'
+bash "$box/update.sh" --rollback v1.0.0 >"$out" 2>&1 || fail "update.sh --rollback v1.0.0 failed" "$(tail -n 8 "$out")"
 check "it's at v1.0.0" test "$(at)" = v1.0.0
 check "the files are v1.0.0's" grep -qx 'release 1.0.0' "$box/release.txt"
 bash "$box/update.sh" >"$out" 2>&1 || fail "back to the newest failed" "$(tail -n 8 "$out")"
@@ -135,7 +143,7 @@ git -C "$box4" fetch -q --depth 1 origin refs/tags/v1.1.0:refs/tags/v1.1.0
 git -C "$box4" checkout -q --detach refs/tags/v1.1.0
 printf 'v1.1.0\n' >"$box4/.git/telemetry-finished"
 check "the old-style install is shallow" test "$(git -C "$box4" rev-parse --is-shallow-repository)" = true
-bash "$box4/update.sh" v1.0.0 >"$out" 2>&1 || fail "the downgrade on a shallow install failed" "$(tail -n 8 "$out")"
+bash "$box4/update.sh" --rollback v1.0.0 >"$out" 2>&1 || fail "the downgrade on a shallow install failed" "$(tail -n 8 "$out")"
 check "it's at v1.0.0" test "$(git -C "$box4" describe --tags --exact-match HEAD)" = v1.0.0
 check "with v1.0.0's files" grep -qx 'release 1.0.0' "$box4/release.txt"
 check "and isn't shallow any more" test "$(git -C "$box4" rev-parse --is-shallow-repository)" = false
@@ -166,6 +174,74 @@ done
 bash "$box/update.sh" >"$out" 2>&1 || fail "the update to v1.10.0 failed" "$(tail -n 8 "$out")"
 check "it's at v1.10.0, not v1.9.0 or v1.2.0" test "$(at)" = v1.10.0
 check "with v1.10.0's files" grep -qx 'release 1.10.0' "$box/release.txt"
+
+echo "== update.sh: with a trusted signers file, only tags signed by a key in it install (OPS-75)"
+ssh-keygen -q -t ed25519 -N '' -C trusted -f "$work/trusted"
+ssh-keygen -q -t ed25519 -N '' -C stranger -f "$work/stranger"
+signers="$work/allowed_signers"
+printf 'malorie namespaces="git" %s\n' "$(cat "$work/trusted.pub")" >"$signers"
+chmod 644 "$signers"
+export TELEMETRY_ALLOWED_SIGNERS="$signers"
+S=("${G[@]}" -c gpg.format=ssh -c gpg.ssh.program=ssh-keygen)
+release() {   # version, then how to tag it: unsigned | lightweight | <key file>
+    printf 'release %s\n' "$1" >"$origin/release.txt"
+    "${G[@]}" -C "$origin" commit -qam "v$1"
+    case "$2" in
+        lightweight) "${G[@]}" -C "$origin" tag "v$1" ;;
+        unsigned)    "${G[@]}" -C "$origin" tag -a "v$1" -m "v$1" ;;
+        *)           "${S[@]}" -c user.signingkey="$2" -C "$origin" tag -s "v$1" -m "v$1" ;;
+    esac
+}
+release 1.11.0 lightweight
+bash "$box/update.sh" >"$out" 2>&1 && fail "a lightweight tag was installed" "" || CHECKS=$((CHECKS + 1))
+check "a lightweight tag is refused as unsigned" has '!!! v1.11.0 isn'"'"'t signed'
+check "and nothing moved" test "$(at)" = v1.10.0
+"${G[@]}" -C "$origin" tag -d v1.11.0 >/dev/null
+"${G[@]}" -C "$origin" tag -a v1.11.0 -m v1.11.0
+bash "$box/update.sh" >"$out" 2>&1 && fail "an unsigned annotated tag was installed" "" || CHECKS=$((CHECKS + 1))
+check "an unsigned annotated tag is refused" has '!!! v1.11.0 isn'"'"'t signed'
+"${G[@]}" -C "$origin" tag -d v1.11.0 >/dev/null
+"${S[@]}" -c user.signingkey="$work/stranger" -C "$origin" tag -s v1.11.0 -m v1.11.0
+bash "$box/update.sh" >"$out" 2>&1 && fail "a stranger's signature was accepted" "" || CHECKS=$((CHECKS + 1))
+check "a key not in the file is refused" has '!!! v1.11.0 isn'"'"'t signed by a trusted key'
+check "still at v1.10.0" test "$(at)" = v1.10.0
+check "the refused tag isn't kept locally" bash -c '! git -c safe.directory="$1" -C "$1" rev-parse -q --verify refs/tags/v1.11.0' _ "$box"
+"${G[@]}" -C "$origin" tag -d v1.11.0 >/dev/null
+"${S[@]}" -c user.signingkey="$work/trusted" -C "$origin" tag -s v1.11.0 -m v1.11.0
+bash "$box/update.sh" >"$out" 2>&1 || fail "a trusted signature was refused" "$(tail -n 8 "$out")"
+check "a trusted signature installs" test "$(at)" = v1.11.0
+check "it says so" has 'v1.11.0 is signed by a trusted key'
+check "the first sight is recorded" grep -q '^v1.11.0 ' "$work/state/tags"
+
+echo "== update.sh: a tag that moved after the box first saw it is refused (OPS-75)"
+release 1.12.0 "$work/trusted"
+bash "$box/update.sh" >"$out" 2>&1 || fail "v1.12.0 failed" "$(tail -n 8 "$out")"
+bash "$box/update.sh" --rollback v1.11.0 >"$out" 2>&1 || fail "the rollback to v1.11.0 failed" "$(tail -n 8 "$out")"
+"${G[@]}" -C "$origin" tag -d v1.12.0 >/dev/null
+"${G[@]}" -C "$origin" commit -q --allow-empty -m "v1.12.0, again"
+"${S[@]}" -c user.signingkey="$work/trusted" -C "$origin" tag -s v1.12.0 -m v1.12.0
+git -c safe.directory="$box" -C "$box" tag -d v1.12.0 >/dev/null
+bash "$box/update.sh" >"$out" 2>&1 && fail "a moved tag was installed" "" || CHECKS=$((CHECKS + 1))
+check "it says the tag moved" has '!!! v1.12.0 has moved'
+check "it stays at v1.11.0" test "$(at)" = v1.11.0
+
+echo "== update.sh: the signers file must be root's; --auto needs one (OPS-75)"
+chmod 666 "$signers"
+bash "$box/update.sh" >"$out" 2>&1 && fail "a world-writable signers file was trusted" "" || CHECKS=$((CHECKS + 1))
+check "a writable signers file is refused" has '!!! the trusted signers file isn'"'"'t locked down'
+chmod 644 "$signers"
+TELEMETRY_ALLOWED_SIGNERS="$work/missing" bash "$box/update.sh" --auto >"$out" 2>&1 && fail "--auto ran without signers" "" || CHECKS=$((CHECKS + 1))
+check "--auto refuses without a signers file" has '!!! no trusted signers file'
+TELEMETRY_ALLOWED_SIGNERS="$work/missing" bash "$box/update.sh" --rollback v1.10.0 >"$out" 2>&1 || fail "a manual run without signers failed" "$(tail -n 8 "$out")"
+check "a manual run without one warns" has 'WARNING: no trusted signers file'
+check "and goes ahead" test "$(at)" = v1.10.0
+bash "$box/update.sh" v1.11.0 >"$out" 2>&1 || fail "back to v1.11.0 failed" "$(tail -n 8 "$out")"
+
+echo "== update.sh: when the newest tag is older than the installed one (deleted on GitHub), it stays (OPS-75)"
+"${G[@]}" -C "$origin" tag -d v1.12.0 v1.11.0 >/dev/null
+bash "$box/update.sh" >"$out" 2>&1 && fail "it went back to v1.10.0 on its own" "" || CHECKS=$((CHECKS + 1))
+check "it refuses the older newest tag" has '!!! v1.10.0 is older than this box'"'"'s v1.11.0'
+check "it stays at v1.11.0" test "$(at)" = v1.11.0
 
 echo
 if [ "$FAILS" -gt 0 ]; then echo "UPDATE CHECKS FAILED: $FAILS failure(s), $CHECKS passed" >&2; exit 1; fi

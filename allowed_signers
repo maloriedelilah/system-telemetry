@@ -1,0 +1,7 @@
+# Keys whose release tags boxes install (OPS-75). One per line, in ssh-keygen's allowed-signers
+# format:  <name> namespaces="git" <key type> <public key> [comment]
+#
+# Boxes judge a tag by their own trusted copy of this file (install.sh puts it at
+# /etc/telemetry/allowed_signers, or C:\ProgramData\telemetry\allowed_signers), never by the copy
+# in a checkout. release.sh refuses to push a tag whose signature this file doesn't accept.
+# Malorie's key now; Prime's when it takes over signing. Add one before retiring the other.

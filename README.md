@@ -83,8 +83,9 @@ sudo ./install.sh --reconfigure
 
 ```bash
 cd /opt/telemetry   # or  cd /c/telemetry (elevated Git Bash)
-sudo ./update.sh            # the newest vX.Y.Z tag
-sudo ./update.sh v1.4.0     # or a specific one
+sudo ./update.sh                     # the newest vX.Y.Z tag
+sudo ./update.sh v1.4.0              # or a specific one (not older than the installed one)
+sudo ./update.sh --rollback v1.4.0   # back to an older one, on purpose
 ```
 
 It fetches the tag with the box's deploy key, checks it out, then re-runs as the new
@@ -93,11 +94,21 @@ to tracked files (nothing is changed). `.env`, `venv/`, `secrets/` and `logs/` a
 so an update never touches them.
 
 **A `vX.Y.Z` tag is code each box runs as root** at its next update (the checkout, then pip
-and the restart), so two things guard it:
+and the restart), so these guard it, all checked by the box's current `update.sh` before
+anything is checked out:
 
 - `update.sh` installs a tag only if its commit is on main (which takes only reviewed,
-  CI-green PRs). A tag off main is refused before anything is checked out, by the box's
-  current `update.sh`.
+  CI-green PRs).
+- **Signed releases (OPS-75).** When the box has a trusted signers file
+  (`/etc/telemetry/allowed_signers`, or `C:\ProgramData\telemetry\allowed_signers`, root's
+  or Administrators' only), a tag must carry an SSH signature by a key in it. Unsigned,
+  lightweight or GPG-signed tags are refused. The `allowed_signers` in the checkout is never
+  what judges a tag: the box's own copy is. Without the file a manual run warns and goes on;
+  an unattended run (`--auto`) refuses.
+- A tag that has moved since the box first saw it is refused (first sights are kept in
+  `/var/lib/telemetry-update/tags`, or `C:\ProgramData\telemetry\state\tags`).
+- An older tag than the installed one is refused unless `--rollback` names it, so a tag
+  deleted on GitHub never walks a box backwards.
 - On GitHub, Settings → Rules → Rulesets, a tag ruleset on `v*` restricts creations,
   updates and deletions to the repo admin.
 
@@ -114,7 +125,15 @@ replaced; `.env`, the venv, `secrets/` and the logs are kept.
 
 ## Cut a release (maintainer)
 
-One command, from any clone of the repo, with `gh` authed:
+One command, from any clone of the repo, with `gh` authed (and `gh auth setup-git`, so git
+can push the tag) and your SSH signing key set up once:
+
+```bash
+git config --global gpg.format ssh
+git config --global user.signingkey ~/.ssh/id_ed25519.pub   # a key listed in allowed_signers
+```
+
+Then:
 
 ```bash
 ./release.sh          # next patch  (v1.4.0 -> v1.4.1)
@@ -122,11 +141,17 @@ One command, from any clone of the repo, with `gh` authed:
 ./release.sh v1.6.0   # a specific version, newer than the newest
 ```
 
-GitHub tags main's current commit `vX.Y.Z` and publishes the release, with notes listing
-the merged PRs. The tag is the version: nothing in the code is bumped, so nothing is
+It tags main's current commit `vX.Y.Z` with an annotated tag signed by your SSH key, checks
+the signature against main's `allowed_signers` (a key boxes wouldn't accept is refused before
+anything is pushed), pushes the tag, then publishes the release with notes listing the merged
+PRs. The tag is the version: nothing in the code is bumped, so nothing is
 committed or pushed (main takes changes only through PRs). It releases GitHub's main as it
 is (not your clone's files), only once main's CI has passed on that commit, and refuses if
 main hasn't changed since the last release. Boxes pick up the newest tag with `./update.sh`.
+
+**`allowed_signers`** lists the keys whose tags boxes install: Malorie's for now, Prime's
+later. It's changed by PR like any code, and reaches a box's trusted copy only through
+`./install.sh` (run by hand) or a release signed by a key the box already trusts.
 
 ## Layout
 
@@ -141,8 +166,9 @@ telemetry/          the package
   heartbeats.py     status files from occasional jobs -> live heartbeats (HEARTBEATS_DIR)
   __main__.py       orchestrator (python -m telemetry)
 install.sh          interactive installer (prompts -> .env, venv, service)
-update.sh           move to the newest release tag (deploy key) + deps + restart
-release.sh          maintainer: tag main vX.Y.Z and publish the release (one command)
+update.sh           move to the newest signed release tag (deploy key) + deps + restart
+release.sh          maintainer: sign and push the tag vX.Y.Z on main, publish the release
+allowed_signers     the keys whose release tags boxes install (OPS-75)
 sites.txt           the public sites pane probes (TELEMETRY_SITES=1)
 .env.example        config schema reference (the installer writes the real .env)
 service/            systemd unit/timer + NSSM reference
