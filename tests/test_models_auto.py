@@ -242,6 +242,79 @@ def test_http_answers_have_a_deadline_and_a_size_cap():
         srv.shutdown()
 
 
+def test_the_deadline_covers_the_headers_too():
+    # Errata L9 on #12: urlopen read the status line and headers before the deadline loop began,
+    # so a server trickling one header byte at a time held read_models for over 75 s.
+    import socket as _s, threading, time as _t
+    lsn = _s.socket(); lsn.bind(("127.0.0.1", 0)); lsn.listen(4)
+    port = lsn.getsockname()[1]
+    stop = threading.Event()
+
+    def serve():
+        while not stop.is_set():
+            try:
+                c, _ = lsn.accept()
+            except OSError:
+                return
+            def trickle(c=c):
+                try:
+                    c.recv(4096)
+                    c.sendall(b"HTTP/1.0 200 OK\r\nX-Slow: ")
+                    while not stop.is_set():
+                        c.sendall(b"a"); _t.sleep(0.2)
+                except OSError:
+                    pass
+                finally:
+                    c.close()
+            threading.Thread(target=trickle, daemon=True).start()
+    threading.Thread(target=serve, daemon=True).start()
+    real = nvidia.__dict__.get("_real_http_json")
+    try:
+        t0 = _t.monotonic()
+        try:
+            real(f"http://127.0.0.1:{port}/api/ps", timeout=1)
+            raise AssertionError("trickled headers were waited out")
+        except TimeoutError:
+            pass
+        assert _t.monotonic() - t0 < 2, f"took {_t.monotonic() - t0:.1f} s"
+        # a normal answer still parses, and a non-200 is an error rather than a label
+        import http.server
+        class Ok(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a): pass
+            def do_GET(self):
+                body = b'{"models":[{"name":"qwen3:8b"}]}' if self.path == "/api/ps" else b"no"
+                self.send_response(200 if self.path == "/api/ps" else 404)
+                self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Ok)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            base = f"http://127.0.0.1:{srv.server_address[1]}"
+            assert real(f"{base}/api/ps") == {"models": [{"name": "qwen3:8b"}]}
+            try:
+                real(f"{base}/nope")
+                raise AssertionError("a 404 was accepted")
+            except ValueError:
+                pass
+        finally:
+            srv.shutdown()
+    finally:
+        stop.set(); lsn.close()
+
+
+def test_llama_busy_label_is_the_program_name_only():
+    # Errata L10 on #12: a spaced argv[0] plus another argument skips _split_title.
+    kind, label = nvidia._identify("llama-server", ["/usr/bin/llama-server --api-key sk-1", "x"])
+    assert label == "busy: llama-server", label
+
+
+def test_vllm_switches_dont_swallow_the_model():
+    # Errata's note on #12: a valueless flag took the model as its value.
+    for argv in (["vllm", "serve", "--trust-remote-code", "Qwen/Qwen3-8B"],
+                 ["vllm", "serve", "--enforce-eager", "--port", "8000", "Qwen/Qwen3-8B"],
+                 ["vllm", "serve", "--api-key", "sk-x", "--enable-prefix-caching", "Qwen/Qwen3-8B"]):
+        assert nvidia._identify("vllm", argv) == ("model", "Qwen3-8B"), argv
+
+
 def test_explicit_zero_with_lhm_gpus_stays_off():
     # Errata L8: a box taking GPUs from LHM said TELEMETRY_NVIDIA=0 to avoid counting each card twice.
     assert _config_in_child({"TELEMETRY_NVIDIA": "0", "LHM_GPUS": "1"})[:2] == ["off", "False"]
