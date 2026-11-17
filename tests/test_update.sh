@@ -204,14 +204,21 @@ check "an unsigned annotated tag is refused" has '!!! v1.11.0 isn'"'"'t signed'
 "${S[@]}" -c user.signingkey="$work/stranger" -C "$origin" tag -s v1.11.0 -m v1.11.0
 bash "$box/update.sh" >"$out" 2>&1 && fail "a stranger's signature was accepted" "" || CHECKS=$((CHECKS + 1))
 check "a key not in the file is refused" has '!!! v1.11.0 isn'"'"'t signed by a trusted key'
+# The case Errata asked about: git says "Good signature" for the stranger's valid signature, then
+# "No principal matched" and exits 1. update.sh refuses on that, and the file alone decides:
+check "git's own words show the signature was valid but unlisted" has 'No principal matched'
+cat "$signers" "$work/stranger.pub" | awk 'NR == 1 { print; next } { print "stranger namespaces=\"git\" " $0 }' >"$work/both"
+check "the same tag verifies once the stranger is listed (so the file is what refused it)" \
+    git -C "$origin" -c gpg.ssh.program=ssh-keygen -c gpg.ssh.allowedSignersFile="$work/both" verify-tag v1.11.0
 check "still at v1.10.0" test "$(at)" = v1.10.0
 check "the refused tag isn't kept locally" bash -c '! git -c safe.directory="$1" -C "$1" rev-parse -q --verify refs/tags/v1.11.0' _ "$box"
 "${G[@]}" -C "$origin" tag -d v1.11.0 >/dev/null
 "${S[@]}" -c user.signingkey="$work/trusted" -C "$origin" tag -s v1.11.0 -m v1.11.0
 bash "$box/update.sh" >"$out" 2>&1 || fail "a trusted signature was refused" "$(tail -n 8 "$out")"
 check "a trusted signature installs" test "$(at)" = v1.11.0
-check "it says so" has 'v1.11.0 is signed by a trusted key'
+check "it says whose key" has "v1.11.0 is signed by malorie's trusted key"
 check "the first sight is recorded" grep -q '^v1.11.0 ' "$work/state/tags"
+check "and the box is marked as verified from now on" grep -q ' v1.11.0$' "$work/state/verified"
 
 echo "== update.sh: a tag that moved after the box first saw it is refused (OPS-75)"
 release 1.12.0 "$work/trusted"
@@ -230,11 +237,16 @@ chmod 666 "$signers"
 bash "$box/update.sh" >"$out" 2>&1 && fail "a world-writable signers file was trusted" "" || CHECKS=$((CHECKS + 1))
 check "a writable signers file is refused" has '!!! the trusted signers file isn'"'"'t locked down'
 chmod 644 "$signers"
-TELEMETRY_ALLOWED_SIGNERS="$work/missing" bash "$box/update.sh" --auto >"$out" 2>&1 && fail "--auto ran without signers" "" || CHECKS=$((CHECKS + 1))
+TELEMETRY_STATE_DIR="$work/state-auto" TELEMETRY_ALLOWED_SIGNERS="$work/missing" bash "$box/update.sh" --auto >"$out" 2>&1 && fail "--auto ran without signers" "" || CHECKS=$((CHECKS + 1))
 check "--auto refuses without a signers file" has '!!! no trusted signers file'
-TELEMETRY_ALLOWED_SIGNERS="$work/missing" bash "$box/update.sh" --rollback v1.10.0 >"$out" 2>&1 || fail "a manual run without signers failed" "$(tail -n 8 "$out")"
-check "a manual run without one warns" has 'WARNING: no trusted signers file'
+TELEMETRY_ALLOWED_SIGNERS="$work/missing" bash "$box/update.sh" --rollback v1.10.0 >"$out" 2>&1 && fail "a verified box ran without its signers file" "" || CHECKS=$((CHECKS + 1))
+check "once verified, a missing file is a refusal, --rollback included" has '!!! the trusted signers file is gone'
+check "and nothing moved" test "$(at)" = v1.11.0
+TELEMETRY_STATE_DIR="$work/state-new" TELEMETRY_ALLOWED_SIGNERS="$work/missing" bash "$box/update.sh" --rollback v1.10.0 >"$out" 2>&1 \
+    || fail "a never-verified box's manual run without signers failed" "$(tail -n 8 "$out")"
+check "a box never verified warns instead" has 'WARNING: no trusted signers file'
 check "and goes ahead" test "$(at)" = v1.10.0
+check "without marking itself verified" test ! -e "$work/state-new/verified"
 bash "$box/update.sh" v1.11.0 >"$out" 2>&1 || fail "back to v1.11.0 failed" "$(tail -n 8 "$out")"
 
 echo "== update.sh: when the newest tag is older than the installed one (deleted on GitHub), it stays (OPS-75)"

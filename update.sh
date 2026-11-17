@@ -13,7 +13,7 @@
 #     ./update.sh --auto              # unattended (OPS-75): the trusted signers file is required
 #
 # Signed releases (OPS-75): when this box has a trusted allowed-signers file (install.sh puts it at
-# /etc/telemetry/allowed_signers, or C:\ProgramData\telemetry\allowed_signers), a tag is installed
+# /etc/telemetry/allowed_signers, or C:\ProgramData\telemetry\secrets\allowed_signers), a tag is installed
 # only if it carries an SSH signature by a key in that file. The copy inside the checkout is never
 # used to judge a tag. A tag that has moved since this box first saw it is refused, and so is an
 # older tag than the one installed, unless --rollback says so.
@@ -39,7 +39,7 @@
 #   TELEMETRY_SKIP_SERVICE=1   don't pip install or restart (tests)
 #   TELEMETRY_ALLOWED_SIGNERS  the trusted signers file (defaults above)
 #   TELEMETRY_STATE_DIR        where first-seen tag records live (default /var/lib/telemetry-update,
-#                              or C:\ProgramData\telemetry\state)
+#                              or C:\ProgramData\telemetry\secrets\state)
 # ---------------------------------------------------------------------------
 set -Eeuo pipefail
 
@@ -73,8 +73,10 @@ case "$(uname -s)" in
                           DEFAULT_SIGNERS=/etc/telemetry/allowed_signers
                           DEFAULT_STATE=/var/lib/telemetry-update ;;
     MINGW*|MSYS*|CYGWIN*) OS=windows; DEFAULT_KEY=/c/ProgramData/telemetry/secrets/deploy_key
-                          DEFAULT_SIGNERS=/c/ProgramData/telemetry/allowed_signers
-                          DEFAULT_STATE=/c/ProgramData/telemetry/state ;;
+                          # In secrets\, which only SYSTEM and Administrators can write: ProgramData's
+                          # default ACL lets any user create files beside it (Errata, OPS-75 Low).
+                          DEFAULT_SIGNERS=/c/ProgramData/telemetry/secrets/allowed_signers
+                          DEFAULT_STATE=/c/ProgramData/telemetry/secrets/state ;;
     *) report "unsupported OS" "uname -s" "Linux or Git Bash on Windows" "$(uname -s)" "run it on a supported box."; exit 2 ;;
 esac
 KEY="${TELEMETRY_DEPLOY_KEY:-$DEFAULT_KEY}"
@@ -180,7 +182,10 @@ if [[ -n "$target" && ! "$target" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9
 fi
 
 # The trusted signers file decides what runs here as root, so only root (or Administrators) may
-# change it. Unattended updates (--auto) need it; a manual run without it warns and goes on.
+# change it. Unattended updates (--auto) need it. A manual run without it warns and goes on, but only
+# on a box that has never installed a verified release: once one has, a missing file means it was
+# removed, and nothing installs until ./install.sh puts it back (Errata, OPS-75).
+VERIFIED_MARK="$STATE_DIR/verified"
 if [[ -e "$SIGNERS" ]]; then
     if [[ "$OS" == linux ]] && { [[ "$(stat -c %u "$SIGNERS")" != 0 ]] || [[ $(( 0$(stat -c %a "$SIGNERS") & 022 )) != 0 ]]; }; then
         report "the trusted signers file isn't locked down" "stat $SIGNERS" "owned by root, writable only by root" \
@@ -188,6 +193,20 @@ if [[ -e "$SIGNERS" ]]; then
             "if nobody changed it on purpose, find out who did; then: chown root:root $SIGNERS && chmod 644 $SIGNERS, and run ./update.sh again."
         exit 2
     fi
+    if [[ "$OS" == windows ]]; then
+        acl="$(icacls "$(cygpath -w "$(dirname "$SIGNERS")")" 2>&1 || true)"
+        if grep -Eqi '\\Users:|Everyone:|Authenticated Users:' <<<"$acl"; then
+            report "the trusted signers folder isn't locked down" "icacls $(dirname "$SIGNERS")" "SYSTEM and Administrators only" \
+                "$(grep -Ei '\\Users:|Everyone:|Authenticated Users:' <<<"$acl" | tr -s ' ' | tr '\n' ';')" \
+                "lock it as the README's First install does (icacls ... /inheritance:r /grant:r SYSTEM and Administrators), then run ./update.sh again."
+            exit 2
+        fi
+    fi
+elif [[ -e "$VERIFIED_MARK" ]]; then
+    report "the trusted signers file is gone" "looked for $SIGNERS" "the allowed-signers file (this box has installed verified releases since $(cat "$VERIFIED_MARK" 2>/dev/null))" \
+        "missing" \
+        "nothing installs without it, --rollback included. If nobody removed it on purpose, find out who did; then run ./install.sh by hand to put it back."
+    exit 2
 elif [[ "$AUTO" == 1 ]]; then
     report "no trusted signers file" "looked for $SIGNERS" "the allowed-signers file install.sh puts there" "missing" \
         "run ./install.sh by hand once (it installs the file), then unattended updates can run."
@@ -322,6 +341,7 @@ fi
 # --- signed by a trusted key, and not moved (OPS-75) ------------------------------
 # Like the main check, this runs in the box's own update.sh before the checkout, against the box's
 # own copy of the signers, so a rogue tag can't vouch for itself.
+signed_ok=0
 refuse_tag() {   # what, got, next
     g tag -d "$target" >/dev/null 2>&1 || true
     if [[ "$fresh_git" == 1 ]]; then
@@ -343,14 +363,20 @@ if [[ -f "$SIGNERS" ]]; then
             "don't install it: releases are signed now, so an unsigned tag wasn't made by release.sh. Tell Malorie and Hopper."
     fi
     # ssh-keygen itself, whatever a global gpg.ssh.program says.
-    if ! g -c gpg.format=ssh -c gpg.ssh.program=ssh-keygen -c gpg.ssh.allowedSignersFile="$sig" \
-            -c gpg.program=false -c gpg.x509.program=false \
-            verify-tag "$target" >"$tmp/verify" 2>&1; then
+    # git prints "Good signature" for a key that isn't in the file and then "No principal matched",
+    # exiting 1; the exit code alone is the guarantee, so also require the line naming a listed
+    # signer ('signature for <name>') and the absence of that refusal.
+    vt=0
+    g -c gpg.format=ssh -c gpg.ssh.program=ssh-keygen -c gpg.ssh.allowedSignersFile="$sig" \
+        -c gpg.program=false -c gpg.x509.program=false \
+        verify-tag "$target" >"$tmp/verify" 2>&1 || vt=$?
+    if [[ "$vt" != 0 ]] || ! grep -q 'Good "git" signature for ' "$tmp/verify" || grep -qi 'no principal matched' "$tmp/verify"; then
         refuse_tag "$target isn't signed by a trusted key" "git verify-tag $target (signers: $SIGNERS)" \
             "a signature by a key in this box's trusted signers file" "$(tr '\n' ' ' <"$tmp/verify")" \
             "don't install it. If a new signer was added, the box learns of it from a release signed by a key it already trusts, or from ./install.sh. Otherwise tell Malorie and Hopper."
     fi
-    say "$target is signed by a trusted key."
+    say "$target is signed by $(sed -n 's/.*Good "git" signature for \([^ ]*\).*/\1/p' "$tmp/verify" | head -n 1)'s trusted key."
+    signed_ok=1
 else
     say "WARNING: no trusted signers file ($SIGNERS), so $target's signature isn't checked. ./install.sh puts it there."
 fi
@@ -365,6 +391,8 @@ if [[ -n "$seen" && "$seen" != "$sha" ]]; then
         "don't install it: a release tag never moves. Tell Malorie and Hopper."
 fi
 [[ -n "$seen" ]] || printf '%s %s %s\n' "$target" "$sha" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$STATE_DIR/tags"
+# From the first verified release on, a missing signers file is a refusal (see the preflight).
+[[ "$signed_ok" == 1 && ! -e "$VERIFIED_MARK" ]] && printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$target" >"$VERIFIED_MARK"
 
 if [[ "$converting" == 1 ]]; then
     # Files that differ from the release are kept a copy of, then replaced; git-ignored ones (.env,

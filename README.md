@@ -100,13 +100,15 @@ anything is checked out:
 - `update.sh` installs a tag only if its commit is on main (which takes only reviewed,
   CI-green PRs).
 - **Signed releases (OPS-75).** When the box has a trusted signers file
-  (`/etc/telemetry/allowed_signers`, or `C:\ProgramData\telemetry\allowed_signers`, root's
+  (`/etc/telemetry/allowed_signers`, or `C:\ProgramData\telemetry\secrets\allowed_signers`, root's
   or Administrators' only), a tag must carry an SSH signature by a key in it. Unsigned,
   lightweight or GPG-signed tags are refused. The `allowed_signers` in the checkout is never
-  what judges a tag: the box's own copy is. Without the file a manual run warns and goes on;
-  an unattended run (`--auto`) refuses.
+  what judges a tag: the box's own copy is. Without the file a manual run warns and goes on,
+  but only until the box's first verified install; after that a missing file is a refusal,
+  manual runs and `--rollback` included. An unattended run (`--auto`) always refuses without
+  it. On Windows the secrets folder must grant only SYSTEM and Administrators.
 - A tag that has moved since the box first saw it is refused (first sights are kept in
-  `/var/lib/telemetry-update/tags`, or `C:\ProgramData\telemetry\state\tags`).
+  `/var/lib/telemetry-update/tags`, or `C:\ProgramData\telemetry\secrets\state\tags`).
 - An older tag than the installed one is refused unless `--rollback` names it, so a tag
   deleted on GitHub never walks a box backwards.
 - On GitHub, Settings → Rules → Rulesets, a tag ruleset on `v*` restricts creations,

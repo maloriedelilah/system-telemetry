@@ -150,7 +150,10 @@ if ! git tag -s -m "$TAG" "$TAG" "$main_sha" 2>"$err"; then
 fi
 # Checked against main's own allowed_signers, as every box will check it, before anyone can see it.
 git show "$main_sha:allowed_signers" >"$work/allowed_signers" 2>/dev/null || : >"$work/allowed_signers"
-if ! git -c gpg.ssh.program=ssh-keygen -c gpg.ssh.allowedSignersFile="$work/allowed_signers" verify-tag "$TAG" >"$err" 2>&1; then
+vt=0
+git -c gpg.ssh.program=ssh-keygen -c gpg.ssh.allowedSignersFile="$work/allowed_signers" verify-tag "$TAG" >"$err" 2>&1 || vt=$?
+# The same test boxes apply: exit 0, a listed signer named, and no "No principal matched".
+if [[ "$vt" != 0 ]] || ! grep -q 'Good "git" signature for ' "$err" || grep -qi 'no principal matched' "$err"; then
     git tag -d "$TAG" >/dev/null
     report "your key isn't in allowed_signers" "git verify-tag $TAG against main's allowed_signers" \
         "a signature boxes will accept" "$(tr '\n' ' ' <"$err")" \
