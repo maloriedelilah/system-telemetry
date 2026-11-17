@@ -253,8 +253,9 @@ def _cmdline(pid):
 
 
 def _split_title(args):
-    """A one-string title ("python3 server.py --api-key k") back into words; anything else as is."""
-    if len(args) == 1 and " " in args[0].strip():
+    """A one-string title ("python3 server.py --api-key k") back into words; anything else as is.
+    A lone argument that is a real path stays whole: C:\\Program Files\\...\\x.exe is a program, not a title."""
+    if len(args) == 1 and " " in args[0].strip() and not os.path.exists(args[0]):
         try:
             return shlex.split(args[0], posix=not sys.platform.startswith("win"))
         except ValueError:
@@ -335,6 +336,14 @@ def _first_word(name):
     return (str(name).split() or ["process"])[0]
 
 
+def _program(arg0):
+    """argv[0] as a program path. The whole string when it exists on disk (a Windows path with spaces);
+    otherwise only its first word, so a rewritten title's options never reach the basename. The check
+    is on the whole string: "/usr/bin/python3 --token ab/cd" doesn't exist, so it is cut at the space."""
+    s = str(arg0)
+    return s if os.path.exists(s) else _first_word(s)
+
+
 def _base(name):
     b = os.path.basename(str(name).replace("\\", "/")).lower()
     return b[:-4] if b.endswith(".exe") else b
@@ -344,7 +353,7 @@ def _identify(pname, args):
     """(kind, label) for one GPU process. kind is "ollama" (label comes from its API), "model" or
     "busy"."""
     pb = _base(pname)
-    a0 = _base(args[0]) if args else ""
+    a0 = _base(_program(args[0])) if args else ""
     argv = args or []
     if "ollama" in pb or "ollama" in a0:
         return "ollama", None
