@@ -307,6 +307,32 @@ def test_llama_busy_label_is_the_program_name_only():
     assert label == "busy: llama-server", label
 
 
+def test_a_spaced_argv0_never_leaks_a_slashed_value():
+    # Errata on #13: the basename was taken before the first word, so a value holding "/" became the label.
+    assert nvidia._identify("llama-server", ["/usr/bin/llama-server --api-key Zm9v/YmFyLXNlY3JldA==", "x"]) \
+        == ("busy", "busy: llama-server")
+    kind, label = nvidia._identify("python3", ["/usr/bin/python3 --token ab/cdSECRET", "x"])
+    assert label == "busy: python3", label
+
+
+def test_a_real_path_with_spaces_stays_whole():
+    # Windows argv[0] like C:\Program Files\...\ollama.exe: cut at the space it would read "program".
+    import tempfile
+    d = tempfile.mkdtemp()
+    try:
+        exe = os.path.join(d, "Program Files", "Tool Box", "llama-server")
+        os.makedirs(os.path.dirname(exe))
+        open(exe, "w").close()
+        assert nvidia._identify("llama-server", [exe, "-m", "/m/q.gguf"]) == ("model", "q")
+        assert nvidia._identify("llama-server", [exe]) == ("busy", "busy: llama-server")
+        assert nvidia._split_title([exe]) == [exe]
+        kind, label = nvidia._identify("mytool", [os.path.join(d, "Program Files", "Tool Box", "missing") + " --k v/x"])
+        assert label == "busy: program", label   # not on disk: cut at the first space, value never shown
+    finally:
+        import shutil as _sh
+        _sh.rmtree(d)
+
+
 def test_vllm_switches_dont_swallow_the_model():
     # Errata's note on #12: a valueless flag took the model as its value.
     for argv in (["vllm", "serve", "--trust-remote-code", "Qwen/Qwen3-8B"],
