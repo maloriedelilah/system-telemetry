@@ -1,0 +1,8 @@
+# Keys whose release tags boxes install (OPS-75). One per line, in ssh-keygen's allowed-signers
+# format:  <name> namespaces="git" <key type> <public key> [comment]
+#
+# Boxes judge a tag by their own trusted copy of this file (install.sh puts it at
+# /etc/telemetry/allowed_signers, or C:\ProgramData\telemetry\secrets\allowed_signers), never by the copy
+# in a checkout. release.sh refuses to push a tag whose signature this file doesn't accept.
+# Malorie's key now; Prime's when it takes over signing. Add one before retiring the other.
+malorie namespaces="git" ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQCv6sExjQbLbn3LA4FzQqHhYETQoO+00QoP1k3lrn9DspamakyrAUYeUEphziLhiUJL4+m3ZE91wGLJL1g0Ly7fMaKH58+jsvs6PFpjcGqn1LK2xfyU6xX7xFp1qVGdI+EHSR6oLLNloZ9gQXJTHmRbPTQcKcHpDDXHCoKIcbQvffjakl35o+7AZAOAu1I0wKIhHpxW40FTjfKu7ipND3tk4vACyVtOudk9FfwIOTZs8wxXV77/uv3uhrhpK6Y8Df8ma9rvySpalXcf8hjKFuH/juoBb/WNRgKrb+DG8pjSa18BcG50mihXKLsHOAKbgViUeaLvEFZQ2mSiGcwkXkrEuVPryy7DO5ptfUDI/ZL8oGPlALsTwIUOVPkpAniXvqQzulHD0c0MHcvyi0x4MLnQPwgftgHJ2YzHJ0b+ijAI+yN9qdZkKHQ13fAoi/dwdwLgrEWWwtG/TUocFOKLuUxAhje+NGn6IDLGcMHJgYzD6xnOQdbrh5n77kZObRXdqfk= malorie@silverpancake

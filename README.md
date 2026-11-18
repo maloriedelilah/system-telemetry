@@ -62,11 +62,12 @@ writes `.env`, builds the venv and registers the service: a **systemd timer** on
 above with one line that `add-box.sh` prints. Under the hood it runs:
 
 ```bash
-sudo ./install.sh --profile host|gpu|vm --pane-url http://<pane>:8427 --run-user telemetry --token-stdin \
-    [--models llamaserver=http://127.0.0.1:1234,http://127.0.0.1:1235 | --models ollama=URL] [--sites]
+sudo ./install.sh --profile host|gpu|vm --pane-url http://<pane>:8427 --run-user telemetry --token-stdin [--sites]
 ```
 
-`host` is CPU/RAM/disk, `gpu` adds NVIDIA, and `vm` is for VMs. MQTT is off in every profile.
+`host` is CPU/RAM/disk and `vm` is for VMs. GPUs and their loaded models are found on their own
+on any profile (see Loaded-model labels), so `gpu` and `--models` are no longer needed; both are
+still accepted. MQTT is off in every profile.
 The profile rewrites `.env` each time, so rerunning the same line puts a drifted box back on
 the standard. `--token-stdin` reads the Pane token on stdin and saves it 0400 for the run user.
 Missing `git`, `python3-venv` or `python3-pip` are installed first. `--sites` turns on the
@@ -85,8 +86,9 @@ sudo ./install.sh --reconfigure
 
 ```bash
 cd /opt/telemetry   # or  cd /c/telemetry (elevated Git Bash)
-sudo ./update.sh            # the newest vX.Y.Z tag
-sudo ./update.sh v1.4.0     # or a specific one
+sudo ./update.sh                     # the newest vX.Y.Z tag
+sudo ./update.sh v1.4.0              # or a specific one (not older than the installed one)
+sudo ./update.sh --rollback v1.4.0   # back to an older one, on purpose
 ```
 
 It fetches the tag with the box's deploy key, checks it out, then re-runs as the new
@@ -95,11 +97,23 @@ to tracked files (nothing is changed). `.env`, `venv/`, `secrets/` and `logs/` a
 so an update never touches them.
 
 **A `vX.Y.Z` tag is code each box runs as root** at its next update (the checkout, then pip
-and the restart), so two things guard it:
+and the restart), so these guard it, all checked by the box's current `update.sh` before
+anything is checked out:
 
 - `update.sh` installs a tag only if its commit is on main (which takes only reviewed,
-  CI-green PRs). A tag off main is refused before anything is checked out, by the box's
-  current `update.sh`.
+  CI-green PRs).
+- **Signed releases (OPS-75).** When the box has a trusted signers file
+  (`/etc/telemetry/allowed_signers`, or `C:\ProgramData\telemetry\secrets\allowed_signers`, root's
+  or Administrators' only), a tag must carry an SSH signature by a key in it. Unsigned,
+  lightweight or GPG-signed tags are refused. The `allowed_signers` in the checkout is never
+  what judges a tag: the box's own copy is. Without the file a manual run warns and goes on,
+  but only until the box's first verified install; after that a missing file is a refusal,
+  manual runs and `--rollback` included. An unattended run (`--auto`) always refuses without
+  it. On Windows the secrets folder must grant only SYSTEM and Administrators.
+- A tag that has moved since the box first saw it is refused (first sights are kept in
+  `/var/lib/telemetry-update/tags`, or `C:\ProgramData\telemetry\secrets\state\tags`).
+- An older tag than the installed one is refused unless `--rollback` names it, so a tag
+  deleted on GitHub never walks a box backwards.
 - On GitHub, Settings → Rules → Rulesets, a tag ruleset on `v*` restricts creations,
   updates and deletions to the repo admin.
 
@@ -116,7 +130,15 @@ replaced; `.env`, the venv, `secrets/` and the logs are kept.
 
 ## Cut a release (maintainer)
 
-One command, from any clone of the repo, with `gh` authed:
+One command, from any clone of the repo, with `gh` authed (and `gh auth setup-git`, so git
+can push the tag) and your SSH signing key set up once:
+
+```bash
+git config --global gpg.format ssh
+git config --global user.signingkey ~/.ssh/id_ed25519.pub   # a key listed in allowed_signers
+```
+
+Then:
 
 ```bash
 ./release.sh          # next patch  (v1.4.0 -> v1.4.1)
@@ -124,11 +146,17 @@ One command, from any clone of the repo, with `gh` authed:
 ./release.sh v1.6.0   # a specific version, newer than the newest
 ```
 
-GitHub tags main's current commit `vX.Y.Z` and publishes the release, with notes listing
-the merged PRs. The tag is the version: nothing in the code is bumped, so nothing is
+It tags main's current commit `vX.Y.Z` with an annotated tag signed by your SSH key, checks
+the signature against main's `allowed_signers` (a key boxes wouldn't accept is refused before
+anything is pushed), pushes the tag, then publishes the release with notes listing the merged
+PRs. The tag is the version: nothing in the code is bumped, so nothing is
 committed or pushed (main takes changes only through PRs). It releases GitHub's main as it
 is (not your clone's files), only once main's CI has passed on that commit, and refuses if
 main hasn't changed since the last release. Boxes pick up the newest tag with `./update.sh`.
+
+**`allowed_signers`** lists the keys whose tags boxes install: Malorie's for now, Prime's
+later. It's changed by PR like any code, and reaches a box's trusted copy only through
+`./install.sh` (run by hand) or a release signed by a key the box already trusts.
 
 ## Layout
 
@@ -140,10 +168,12 @@ telemetry/          the package
   mqtt.py           HA discovery + state publishing
   pane.py           Influx line protocol + push to Pane
   sites.py          public-site health probes (pane only)
+  heartbeats.py     status files from occasional jobs -> live heartbeats (HEARTBEATS_DIR)
   __main__.py       orchestrator (python -m telemetry)
 install.sh          interactive installer (prompts -> .env, venv, service)
-update.sh           move to the newest release tag (deploy key) + deps + restart
-release.sh          maintainer: tag main vX.Y.Z and publish the release (one command)
+update.sh           move to the newest signed release tag (deploy key) + deps + restart
+release.sh          maintainer: sign and push the tag vX.Y.Z on main, publish the release
+allowed_signers     the keys whose release tags boxes install (OPS-75)
 sites.txt           the public sites pane probes (TELEMETRY_SITES=1)
 .env.example        config schema reference (the installer writes the real .env)
 service/            systemd unit/timer + NSSM reference
@@ -153,31 +183,49 @@ service/            systemd unit/timer + NSSM reference
 
 Each box sets what it runs. The collectors are independent flags:
 
-| machine       | NVIDIA | LHM | LHM_GPUS | MODEL_SOURCE | notes |
-|---------------|:------:|:---:|:--------:|--------------|-------|
-| slimridge     |   1    |  0  |    0     | docker       | Linux, single V100; llama.cpp embed + rerank in Docker (user in `docker` group) |
-| Chonky        |   1    |  0* |    0     | none         | RTX 3090; LHM optional for host temps |
-| Eighty-Eight  |   1    |  1  |    0     | lmstudio     | dual Xeon + 3×V100 + K2200; LHM = host temps only (`llamaserver` fits its two llama-server instances on :1234/:1235) |
-| SilverPancake |   0    |  1  |    1     | lmstudio     | Arc B580 has no nvidia-smi; LHM supplies the GPU |
+| variable | default | meaning |
+|----------|---------|---------|
+| `TELEMETRY_NVIDIA` | `auto` | GPUs from `nvidia-smi` whenever it's installed: nothing to set on a GPU box. `off` turns them off; `1` also complains when `nvidia-smi` is missing. The `0` older installs wrote reads as `auto`, except with `LHM_GPUS=1`, where `0` still means off (so a card isn't counted twice). |
+| `TELEMETRY_LHM` | `0` | LibreHardwareMonitor (Windows host temps) |
+| `LHM_GPUS` | `0` | GPUs from LHM too (an Arc card has no `nvidia-smi`) |
+| `TELEMETRY_HOST` | `0` | Linux CPU/RAM/disk (psutil, hwmon) |
+
+| machine       | LHM | LHM_GPUS | notes |
+|---------------|:---:|:--------:|-------|
+| Chonky        |  0* |    0     | RTX 3090; LHM optional for host temps |
+| Eighty-Eight  |  1  |    0     | dual Xeon + 3×V100 + K2200; LHM = host temps only |
+| SilverPancake |  1  |    1     | Arc B580 has no nvidia-smi; LHM supplies the GPU |
 
 `*` flip to 1 whenever you want Chonky's CPU/RAM/disk temps too.
 
-## Model-label sources
+## Loaded-model labels
 
-`MODEL_SOURCE` picks where the "loaded models" label comes from:
+Found on their own; there is nothing to configure. Each cycle `nvidia-smi` lists the processes
+on every card, and each is named:
 
-| source        | reads | `MODEL_API_URL` |
-|---------------|-------|-----------------|
-| `ollama`      | `GET /api/ps` | the Ollama base URL |
-| `lmstudio`    | `GET <MODEL_API_PATH>` (LM Studio's REST API) | the LM Studio base URL |
-| `docker`      | `docker ps` / `docker inspect` (service user in the `docker` group) | unused |
-| `llamaserver` | `GET <url>/v1/models` on each llama.cpp `llama-server` instance, using each `data[].id` | comma-separated base URLs, e.g. `http://127.0.0.1:1234,http://127.0.0.1:1235` |
-| `none`        | VRAM-using compute processes from `nvidia-smi` | unused |
+| on the card | label |
+|-------------|-------|
+| llama.cpp `llama-server` (bare metal, NSSM or Docker) | its `--alias`, else its model file (`-m`, without `.gguf`), else `-hf` repo |
+| Ollama | the models its local API (`/api/ps`) has loaded |
+| vLLM, or anything started with `--model` / `--model-path` | that model |
+| ComfyUI | `busy: ComfyUI` |
+| anything else | `busy: <process>` (`busy: python train.py`): the program name only, never its options |
+| nothing | `idle` |
+| memory in use but no process listed (WSL; another Windows session) | `busy: process not visible` |
+| a lookup that failed | `unknown: <why>`, with the reason on stderr |
 
-The API-based sources can't tell which card a model sits on, so they report the
-full set against GPU 0. `MODEL_FILTER` (comma-separated substrings) keeps only
-matching labels. With `llamaserver`, an instance that doesn't answer is reported
-on stderr and skipped; the other instances' labels still go out.
+Every card gets a label, so the dashboard has a row per card and never a silent gap. A model
+spread over several cards shows on each of them. Ollama doesn't say which card holds which model,
+so every card running Ollama shows its whole list. Ollama is asked at `http://127.0.0.1:11434`;
+set `MODEL_SOURCE=ollama` and `MODEL_API_URL` only if it listens somewhere else.
+
+Labels never carry a process's options: vLLM's model is the first word after `serve` that isn't an
+option, a model URL loses its query string and credentials, and a process that rewrote its title into
+one string is split back into words first. The Ollama lookup has an overall 5 s deadline and a 256 KiB cap.
+
+`MODEL_FILTER` (comma-separated substrings) keeps only matching model names. `MODEL_SOURCE=off`
+turns labels off, and `MODEL_SOURCE=lmstudio` keeps the LM Studio API adapter (`MODEL_API_URL`,
+`MODEL_API_PATH`). The older sources `none`, `docker`, `llamaserver` and `ollama` all mean auto now.
 
 ## Pane
 
@@ -252,6 +300,7 @@ timestamps and no host tag (Pane adds both). VictoriaMetrics names each series
 | `telemetry` | `up=1 gpus=<n>` (heartbeat every cycle, even with no GPU) |
 | `site,site=<label>,check=<health\|up>` | `up reachable code latency_ms db_ok cert_days` (TELEMETRY_SITES=1; `site_up` is what Pane's Sites page reads) |
 | `site_probe` | `sites healthy control_ok` (TELEMETRY_SITES=1) |
+| `heartbeat,check=<name>` | `ok age_s period_s` (HEARTBEATS_DIR status files) |
 
 Readings that are missing or not finite are left out. The GPU memory percentage is
 `mem_pct`, not `mem_used_*`, on purpose: the dashboard takes the max of every series
@@ -284,6 +333,28 @@ The limits:
 When the control URL fails too (`site_probe control_ok` 0), pane has lost the internet and
 the sites may be fine, so alert rules should hold their fire. An unhealthy site prints one line
 on stderr per cycle; it does not fail the cycle.
+
+### Heartbeat files (jobs that run now and then)
+
+A job that runs once a day can't keep a series alive on Pane by itself: the pages look back a
+few minutes. So the job writes a status file when it finishes, and every telemetry cycle turns
+each entry into `heartbeat,check=<name> ok=..,age_s=..,period_s=..` with the age computed now.
+Those are the names Pane's Heartbeats panels read. The age keeps growing between runs, so a
+backup that stops being made shows as it passes its period.
+
+Set `HEARTBEATS_DIR` to the folder (Chonky: `C:\scripts\status`). Each `*.json` in it:
+
+```json
+{"version": 1, "checks": [
+  {"check": "backup:dbserver daily/app", "last_ok": 1794552000, "period_s": 93600, "ok": true}
+]}
+```
+
+- `last_ok` is in Unix seconds, and `period_s` is how old it may get.
+- `ok: false` means the job itself failed.
+- `ok` on Pane is 1 only if the file says ok and the age is within the period.
+- Bad files and entries are reported by name and number, never by their text, and skipped.
+- Limits: 64 files of 64 KiB each, and 500 checks in all.
 
 ### Checking it is arriving
 

@@ -2,10 +2,11 @@
 """Orchestrator / service entrypoint.
 
 Reads role flags from config and runs the enabled collectors:
-  TELEMETRY_NVIDIA -> nvidia.read_gpus + nvidia.read_models
+  TELEMETRY_NVIDIA -> nvidia.read_gpus + nvidia.read_models (auto: whenever nvidia-smi exists)
   TELEMETRY_LHM    -> lhm.read_host_and_gpus (host temps; +GPUs if LHM_GPUS)
   TELEMETRY_HOST   -> linux_host.read_host (Linux psutil/hwmon)
   TELEMETRY_SITES  -> sites.probe_all (public sites' /api/health; Pane output only)
+  HEARTBEATS_DIR   -> heartbeats.read_all (status files from occasional jobs; Pane output only)
 
 Data is collected once, then sent to each enabled output independently:
   PANE_URL set  -> pane.push   (Influx line protocol to Pane)
@@ -29,6 +30,7 @@ from . import linux_host
 from . import mqtt as publisher
 from . import pane
 from . import sites
+from . import heartbeats
 
 dbg = config.dbg
 
@@ -36,6 +38,7 @@ dbg = config.dbg
 def run_once():
     """One publish cycle. Returns True only if every enabled output succeeded."""
     gpus = nvidia.read_gpus() if config.TELEMETRY_NVIDIA else []
+    nvidia_gpus = list(gpus)   # model labels are looked up for these; LHM's GPUs have none
 
     lhm_gpus, host = ([], None)
     if config.TELEMETRY_LHM:
@@ -68,15 +71,27 @@ def run_once():
                           "one result per site", f"{type(e).__name__}: {e}",
                           "this is a bug in telemetry/sites.py; host and GPU data still go out")
 
-    if not gpus and not host and not site_results and site_control is None:
-        print("No GPUs, no host data and no site probes; nothing to publish "
-              "(check TELEMETRY_NVIDIA / TELEMETRY_LHM / TELEMETRY_HOST / TELEMETRY_SITES).",
+    # Status files from occasional jobs go to Pane only. Fenced off like an output: a bug here must
+    # not cost the host and GPU data.
+    beats = []
+    if config.HEARTBEATS_DIR:
+        try:
+            beats = heartbeats.read_all()
+        except Exception as e:
+            config.report("Heartbeat files crashed", f"read {config.HEARTBEATS_DIR}",
+                          "one entry per check", f"{type(e).__name__}: {e}",
+                          "this is a bug in telemetry/heartbeats.py; host and GPU data still go out")
+
+    if not gpus and not host and not site_results and site_control is None and not beats:
+        print("No GPUs, no host data, no site probes and no heartbeat files; nothing to publish "
+              "(check TELEMETRY_NVIDIA / TELEMETRY_LHM / TELEMETRY_HOST / TELEMETRY_SITES / "
+              "HEARTBEATS_DIR).",
               file=sys.stderr, flush=True)
         return False
     dbg(f"found {len(gpus)} GPU(s):", [g["name"] for g in gpus],
         "| host stats:", bool(host))
 
-    models = nvidia.read_models(gpus) if gpus else {}
+    models = nvidia.read_models(nvidia_gpus) if nvidia_gpus else {}
     dbg("model labels:", models)
 
     if not config.PANE_URL and not config.MQTT_HOST:
@@ -95,7 +110,8 @@ def run_once():
     if config.PANE_URL:
         try:
             results.append(pane.push(pane.to_lines(gpus, models, host)
-                                     + pane.site_lines(site_results, site_control)))
+                                     + pane.site_lines(site_results, site_control)
+                                     + pane.heartbeat_lines(beats)))
         except Exception as e:
             config.report("Pane output crashed", "build and push the Pane lines",
                           "a push attempt", f"{type(e).__name__}: {e}",

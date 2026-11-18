@@ -14,6 +14,7 @@ series <measurement>_<field>; the names below are fixed by Pane's fleet dashboar
   mem                            used_gb total_gb used_percent
   disk,disk=<name>               temp_c used_percent
   telemetry                      up=1 gpus=<n>    (heartbeat, every cycle)
+  heartbeat,check=<name>         ok age_s period_s   (HEARTBEATS_DIR status files)
 
 With TELEMETRY_SITES=1 (pane only), site_lines() adds the site probes:
 
@@ -43,9 +44,10 @@ from . import config
 
 dbg = config.dbg
 
-# "nothing is loaded" placeholders that nvidia.read_models() uses as labels; they
-# are not models, so they get no gpu_model series.
-_NO_MODEL = {"none loaded", "idle / no compute job", "unknown", ""}
+# Every card's label is sent, "idle", "busy: ..." and "unknown: ..." included, so the dashboard's
+# model table has a row per card and a gap means the box stopped reporting. Only an empty label
+# (nothing looked up for that index) is skipped.
+_NO_MODEL = {""}
 
 _mode_warned = False
 
@@ -189,6 +191,17 @@ def site_lines(results, control):
     return lines
 
 
+def heartbeat_lines(checks):
+    """Lines for heartbeats.read_all()'s list."""
+    lines = []
+    for c in checks or []:
+        line = _line("heartbeat", [("check", c.get("check"))], [
+            ("ok", c.get("ok")), ("age_s", c.get("age_s")), ("period_s", c.get("period_s"))])
+        if line:
+            lines.append(line)
+    return lines
+
+
 # ---------------------------------------------------------------------------
 # Token
 # ---------------------------------------------------------------------------
@@ -316,7 +329,7 @@ def push(lines):
 
     try:
         req = urllib.request.Request(
-            endpoint, data=("\n".join(lines) + "\n").encode("utf-8"), method="POST",
+            endpoint, data=("\n".join(lines) + "\n").encode("utf-8", "replace"), method="POST",
             headers={"Authorization": f"Bearer {token}",
                      "Content-Type": "text/plain; charset=utf-8"})
         try:
