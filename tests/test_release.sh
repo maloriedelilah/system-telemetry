@@ -11,6 +11,9 @@ has() { grep -q -- "$1" "$out"; }
 
 work="$(mktemp -d)"; out="$(mktemp)"
 trap 'rm -rf "$work" "$out"' EXIT
+# The maintainer's own git config mustn't leak in (a global signing key would hide the "no key" case).
+export GIT_CONFIG_GLOBAL="$work/gitconfig" GIT_CONFIG_NOSYSTEM=1
+: >"$GIT_CONFIG_GLOBAL"
 G=(git -c user.name=test -c user.email=test@example.invalid -c init.defaultBranch=main)
 
 # The "GitHub" repo: a lightweight v1.2.0, an annotated v1.10.0 (sort -V, not text order; and
@@ -20,7 +23,11 @@ G=(git -c user.name=test -c user.email=test@example.invalid -c init.defaultBranc
 origin="$work/origin"
 mkdir -p "$origin"
 "${G[@]}" -C "$origin" init -q
-echo one >"$origin/f"; "${G[@]}" -C "$origin" add f; "${G[@]}" -C "$origin" commit -qm one
+# Signing keys (OPS-75): main lists "trusted" in allowed_signers; "stranger" isn't listed.
+ssh-keygen -q -t ed25519 -N '' -C trusted -f "$work/trusted"
+ssh-keygen -q -t ed25519 -N '' -C stranger -f "$work/stranger"
+printf 'malorie namespaces="git" %s\n' "$(cat "$work/trusted.pub")" >"$origin/allowed_signers"
+echo one >"$origin/f"; "${G[@]}" -C "$origin" add f allowed_signers; "${G[@]}" -C "$origin" commit -qm one
 "${G[@]}" -C "$origin" tag v1.2.0
 echo two >"$origin/f"; "${G[@]}" -C "$origin" commit -qam two
 "${G[@]}" -C "$origin" tag -a v1.10.0 -m v1.10.0
@@ -37,11 +44,14 @@ clone="$work/clone"
 git clone -q "$stale" "$clone"
 cp "$SRC/release.sh" "$clone/"
 echo "a local edit that must not matter" >>"$clone/f"
+git -C "$clone" config user.name Malorie
+git -C "$clone" config user.email malorie@example.invalid
+git -C "$clone" config gpg.ssh.program ssh-keygen   # plain ssh-keygen, whatever a global config says
 
 # The fake gh: builds the JSON GitHub's REST API would return, from the "GitHub" repo, and applies
 # the caller's --jq to it with jq, so release.sh's jq expressions are what the tests exercise.
-# The CI check comes from $FAKE_CI (success, failure, in_progress, none). `gh release create` tags
-# the "GitHub" repo at --target, lightweight, as GitHub does.
+# The CI check comes from $FAKE_CI (success, failure, in_progress, none). `gh release create` only
+# makes the page: with --verify-tag it fails unless the tag is already on the "GitHub" repo.
 mkdir -p "$work/bin"
 cat >"$work/bin/gh" <<'GH'
 #!/usr/bin/env bash
@@ -49,11 +59,12 @@ set -euo pipefail
 printf '%s\n' "$*" >>"$GH_LOG"
 o="$FAKE_ORIGIN"
 if [ "$1" = release ]; then
-    tag="$3"; target=""
+    tag="$3"; verify=0
     shift 3
-    while [ $# -gt 0 ]; do [ "$1" = --target ] && target="$2"; shift; done
-    [ "${FAKE_RELEASE_FAIL:-0}" = 1 ] && { echo "HTTP 422: tag rejected by a ruleset" >&2; exit 1; }
-    git -C "$o" tag "$tag" "$target"
+    while [ $# -gt 0 ]; do [ "$1" = --verify-tag ] && verify=1; [ "$1" = --target ] && { echo "--target used" >&2; exit 1; }; shift; done
+    [ "${FAKE_RELEASE_FAIL:-0}" = 1 ] && { echo "HTTP 422: release page refused" >&2; exit 1; }
+    [ "$verify" = 1 ] || { echo "no --verify-tag" >&2; exit 1; }
+    git -C "$o" rev-parse -q --verify "refs/tags/$tag" >/dev/null || { echo "tag $tag doesn't exist" >&2; exit 1; }
     exit 0
 fi
 path=""; expr="."
@@ -96,10 +107,17 @@ cat >"$work/bin/sort" <<'SORT'
 echo "-VThe system cannot find the file specified." >&2; exit 1
 SORT
 chmod +x "$work/bin/sort"
-export PATH="$work/bin:$PATH" GH_LOG="$work/gh.log" FAKE_ORIGIN="$origin"
+export PATH="$work/bin:$PATH" GH_LOG="$work/gh.log" FAKE_ORIGIN="$origin" TELEMETRY_RELEASE_URL="$origin"
 : >"$GH_LOG"
 main() { git -C "$origin" rev-parse main; }
 tag_at() { git -C "$origin" rev-parse "$1^{commit}" 2>/dev/null; }
+
+echo "== release.sh: no SSH signing key set up (OPS-75)"
+bash "$clone/release.sh" >"$out" 2>&1 && fail "it ran without a signing key" "" || CHECKS=$((CHECKS + 1))
+check "it says how to set one up" has '!!! no SSH signing key set up'
+check "with the git config lines" has 'git config --global gpg.format ssh'
+git -C "$clone" config gpg.format ssh
+git -C "$clone" config user.signingkey "$work/trusted.pub"
 
 echo "== release.sh: main is the newest release, an annotated tag"
 bash "$clone/release.sh" >"$out" 2>&1 && fail "main was released again over an annotated tag" "$(tail -n 4 "$out")" || CHECKS=$((CHECKS + 1))
@@ -120,17 +138,30 @@ FAKE_CI=none bash "$clone/release.sh" >"$out" 2>&1 && fail "a release with no CI
 check "no CI at all is refused and shown" has 'Got:      none'
 check "still no release asked for" bash -c '! grep -q "^release" "$1"' _ "$GH_LOG"
 
-echo "== release.sh: GitHub refuses the release"
-FAKE_RELEASE_FAIL=1 bash "$clone/release.sh" >"$out" 2>&1 && fail "a refused release was reported as made" "" || CHECKS=$((CHECKS + 1))
-check "it says GitHub didn't make it" has "!!! GitHub didn't make the release"
-check "it shows GitHub's reason" has 'tag rejected by a ruleset'
+echo "== release.sh: a key that isn't in allowed_signers is refused before anything is pushed (OPS-75)"
+git -C "$clone" config user.signingkey "$work/stranger.pub"
+bash "$clone/release.sh" >"$out" 2>&1 && fail "a stranger's tag was released" "" || CHECKS=$((CHECKS + 1))
+check "it says the key isn't listed" has "!!! your key isn't in allowed_signers"
+check "no tag reached GitHub" test -z "$(git -C "$origin" tag --list v1.10.1)"
+check "the local tag was removed" test -z "$(git -C "$clone" tag --list v1.10.1)"
 check "So far says nothing was released" has 'So far: nothing was released'
+git -C "$clone" config user.signingkey "$work/trusted.pub"
+
+echo "== release.sh: GitHub refuses the release page after the tag is pushed"
+FAKE_RELEASE_FAIL=1 bash "$clone/release.sh" >"$out" 2>&1 && fail "a refused release was reported as made" "" || CHECKS=$((CHECKS + 1))
+check "it says GitHub didn't make the page" has "!!! GitHub didn't make the release page"
+check "it shows GitHub's reason" has 'release page refused'
+check "So far says the tag is pushed" has 'So far: the signed tag v1.10.1 is on GitHub'
+check "and gives the command to finish" has 'gh release create v1.10.1 --repo maloriedelilah/system-telemetry --verify-tag'
+git -C "$origin" tag -d v1.10.1 >/dev/null; git -C "$clone" tag -d v1.10.1 >/dev/null
 
 echo "== release.sh: a patch release tags main's commit, after the newest by version order"
 if bash "$clone/release.sh" >"$out" 2>&1; then CHECKS=$((CHECKS + 1)); else fail "the patch release failed" "$(tail -n 8 "$out")"; fi
 check "it's v1.10.1 (after v1.10.0; not v1.2.0, v9.0.08 or the decoys)" has 'Releasing v1.10.1'
 check "the tag names GitHub's main, not the clone's stale origin" test "$(tag_at v1.10.1)" = "$(main)"
-check "gh got main's commit as the target" grep -q -- "--target $(main)" "$GH_LOG"
+check "the tag on GitHub is annotated and SSH-signed" bash -c 'git -C "$1" cat-file tag v1.10.1 | grep -q "BEGIN SSH SIGNATURE"' _ "$origin"
+check "and verifies against main's allowed_signers" git -C "$origin" -c gpg.ssh.program=ssh-keygen -c gpg.ssh.allowedSignersFile="$origin/allowed_signers" verify-tag v1.10.1
+check "gh published it with --verify-tag" grep -q -- "release create v1.10.1 .*--verify-tag" "$GH_LOG"
 check "the CI check asked was 'test' on main's commit" grep -q "commits/$(main)/check-runs?check_name=test" "$GH_LOG"
 check "nothing was committed to main" test "$(git -C "$origin" log --format=%s -1 main)" = three
 check "the clone's local edit is untouched" grep -q 'must not matter' "$clone/f"
