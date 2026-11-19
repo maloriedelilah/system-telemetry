@@ -42,7 +42,7 @@ release 1.0.0
 
 export TELEMETRY_REPO="$origin" TELEMETRY_SKIP_SERVICE=1
 export TELEMETRY_STATE_DIR="$work/state" TELEMETRY_ALLOWED_SIGNERS="$work/allowed_signers"
-export TELEMETRY_UPDATER_HEARTBEAT_DIR="$work/hb" TELEMETRY_HEALTH_WAIT_S=10
+export TELEMETRY_UPDATER_HEARTBEAT_DIR="$work/hb" TELEMETRY_HEALTH_WAIT_S=10 TELEMETRY_HEALTH_RETRY_S=0
 
 # The box: a checkout at v1.0.0, put there by update.sh itself (so it's verified and has VERSION).
 box="$work/box"
@@ -157,6 +157,46 @@ FAKE_RESULT=exit-code run && fail "an unhealthy box was updated" "" || CHECKS=$(
 check "it says the baseline failed" has "isn't healthy before updating"
 check "still v1.2.0" test "$(at)" = v1.2.0
 
+echo "== autoupdate: a stale VERSION (from a release that writes one) is dropped, not trusted (Errata L2)"
+printf 'v9.9.9\n' >"$box/VERSION"
+FAKE_RESULT=success run || true
+check "the stale VERSION is gone or rewritten" bash -c '! grep -qx v9.9.9 "$1/VERSION" 2>/dev/null' _ "$box"
+check "and the baseline didn't fail on it" bash -c '! grep -q "isn.t healthy before updating" "$1"' _ "$out"
+
+echo "== autoupdate: only push lines after the version line count (Errata L1)"
+release 1.7.0
+cat >"$work/bin/systemctl" <<'EOF'
+#!/bin/bash
+v="$(cat "$TELEMETRY_DIR/VERSION" 2>/dev/null || echo unknown)"
+case "$1" in
+    start) if [ "$v" = v1.7.0 ]; then
+               printf 'Pane: pushed 9 lines for box (204)\ntelemetry %s\ncycle error\n' "$v" >"$FAKE_JOURNAL"
+           else
+               printf 'telemetry %s\nPane: pushed 9 lines for box (204)\n' "$v" >"$FAKE_JOURNAL"
+           fi ;;
+    show)  echo success ;;
+esac
+EOF
+FAKE_GOOD=v1.2.0 run && fail "an old push line stood in for the new release" "" || CHECKS=$((CHECKS + 1))
+check "a push before the version line doesn't count" has 'v1.7.0 was unhealthy (the run pushed nothing to Pane)'
+check "back at the previous release" bash -c '[ "$(git -c safe.directory="$1" -C "$1" describe --tags --exact-match HEAD)" != v1.7.0 ]' _ "$box"
+
+echo "== autoupdate: a failed first check is retried once before rolling back (Errata L3)"
+release 1.8.0
+cat >"$work/bin/systemctl" <<'EOF'
+#!/bin/bash
+v="$(cat "$TELEMETRY_DIR/VERSION" 2>/dev/null || echo unknown)"
+n=9
+if [ "$v" = v1.8.0 ] && [ ! -e "$FAKE_JOURNAL.blipped" ]; then n=0; touch "$FAKE_JOURNAL.blipped"; fi
+case "$1" in
+    start) if [ "$n" = 0 ]; then printf 'telemetry %s\nPane unreachable\n' "$v"; else printf 'telemetry %s\nPane: pushed %s lines for box (204)\n' "$v" "$n"; fi >"$FAKE_JOURNAL" ;;
+    show)  echo success ;;
+esac
+EOF
+run || fail "a blip cost a good release" "$(tail -n 6 "$out")"
+check "it says it checks again" has 'checking again in 0s'
+check "and keeps the release" has 'updated: .* -> v1.8.0'
+
 echo "== autoupdate: one run at a time"
 mkdir "$work/state/autoupdate.lock"
 run || fail "a locked run failed" "$(tail -n 5 "$out")"
@@ -164,9 +204,10 @@ check "a held lock skips" has 'another run holds the lock'
 rmdir "$work/state/autoupdate.lock"
 
 echo "== autoupdate: .env can only say canary, main or off"
+release 1.9.0
 ring; printf 'TELEMETRY_UPDATE_RING=canary; rm -rf /\n' >>"$box/.env"
-FAKE_GOOD=v1.6.0 run || true
-check "a junk value counts as main (the default)" has "v1.6.0 isn't in PROMOTED yet"
+run || true
+check "a junk value counts as main (the default)" has "v1.9.0 isn't in PROMOTED yet"
 
 echo
 if [ "$FAILS" -gt 0 ]; then echo "AUTOUPDATE CHECKS FAILED: $FAILS of $((CHECKS + FAILS))"; exit 1; fi

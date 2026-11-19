@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # autoupdate.sh — the unattended updater (OPS-75).
 #
-# install.sh copies this OUTSIDE the checkout (/usr/local/sbin/telemetry-autoupdate, or
-# C:\ProgramData\telemetry\bin\autoupdate.sh) and a timer runs it about hourly as root (or SYSTEM).
+# install.sh will copy this OUTSIDE the checkout (/usr/local/sbin/telemetry-autoupdate, or
+# C:\ProgramData\telemetry\bin\autoupdate.sh) and a timer will run it about hourly as root (or
+# SYSTEM): that's OPS-75 part B, which ships in the same release as this file. Until then nothing
+# runs it.
 # Living outside the checkout means a broken release can't break the thing that rolls it back.
 #
 # Each run:
@@ -20,7 +22,8 @@
 #   9. writes the telemetry-update heartbeat (ok, and when it last was) for Pane
 #
 # Env (tests and odd boxes): TELEMETRY_DIR, TELEMETRY_STATE_DIR, TELEMETRY_UPDATER_HEARTBEAT_DIR,
-# TELEMETRY_REPO, TELEMETRY_DEPLOY_KEY, TELEMETRY_SOAK_S, TELEMETRY_HEALTH_WAIT_S.
+# TELEMETRY_REPO, TELEMETRY_DEPLOY_KEY, TELEMETRY_SOAK_S, TELEMETRY_HEALTH_WAIT_S,
+# TELEMETRY_HEALTH_RETRY_S.
 set -euo pipefail
 export LC_ALL=C
 umask 022
@@ -45,6 +48,7 @@ REPO_URL="${TELEMETRY_REPO:-git@github.com:maloriedelilah/system-telemetry.git}"
 KEY="${TELEMETRY_DEPLOY_KEY:-$DEFAULT_KEY}"
 SOAK_S="${TELEMETRY_SOAK_S:-86400}"
 HEALTH_WAIT_S="${TELEMETRY_HEALTH_WAIT_S:-180}"
+RETRY_S="${TELEMETRY_HEALTH_RETRY_S:-60}"
 SERVICE_NAME="system-telemetry"
 PERIOD_S=7200   # the heartbeat is late when no run has finished in 2 h (the timer runs hourly)
 # GitHub's published ed25519 host key (api.github.com/meta), as update.sh pins it.
@@ -159,20 +163,19 @@ health() {   # want_version
         out="$(journalctl -u "${SERVICE_NAME}.service" --since "$since" -o cat --no-pager 2>/dev/null || true)"
         [[ "$res" == success ]] || { echo "the run's Result is ${res:-unknown}"; return 1; }
     else
-        # NSSM loop service: restart it and read what it logs from here on.
-        local logf="$INSTALL_DIR/logs/telemetry.out.log" from waited=0
-        from="$(stat -c %s "$logf" 2>/dev/null || echo 0)"
-        nssm restart "$SERVICE_NAME" >/dev/null 2>&1 || true
-        while (( waited < HEALTH_WAIT_S )); do
-            sleep 5; waited=$((waited + 5))
-            # Python on Windows writes CRLF; the line checks below want bare lines.
-            out="$(tail -c +"$((from + 1))" "$logf" 2>/dev/null | tr -d '\r' || true)"
-            grep -q '^Pane: pushed ' <<<"$out" && break
-        done
+        # Windows: one telemetry cycle in the foreground, as SYSTEM like the NSSM service and with
+        # the same .env, but LOOP_INTERVAL emptied (the environment wins over .env), so it runs
+        # once and exits. Its own output and exit code are the evidence: no service log to tail, so
+        # NSSM's log rotation and the old process's last lines can't confuse it (Errata B2, L1).
+        local py="$INSTALL_DIR/venv/Scripts/python.exe" rc=0
+        out="$(cd "$INSTALL_DIR" && LOOP_INTERVAL="" timeout "$HEALTH_WAIT_S" "$py" -m telemetry 2>&1 | tr -d '\r')" || rc=$?
+        (( rc == 0 )) || { echo "the run exited $rc"; return 1; }
     fi
     if [[ -n "$want" ]] && ! grep -qxF "telemetry $want" <<<"$out"; then
         echo "the run didn't say 'telemetry $want'"; return 1
     fi
+    # Only push lines after the version line count: an earlier run's line can't stand in (Errata L1).
+    if [[ -n "$want" ]]; then out="$(awk -v v="telemetry $want" 'f; $0 == v { f = 1 }' <<<"$out")"; fi
     n="$(grep -E '^Pane: pushed [0-9]+ lines' <<<"$out" | tail -n 1 | awk '{ print $3 }')"
     [[ -n "$n" ]] || { echo "the run pushed nothing to Pane"; return 1; }
     echo "$n"
@@ -182,6 +185,11 @@ health() {   # want_version
 # now is the bar the new release has to meet. Releases before VERSION files (v1.8.0 and older)
 # print no version line, so the baseline skips that part for them.
 base_want="$current"
+# A VERSION that doesn't match the checked-out tag is left from a release that writes one, after a
+# move back to one that doesn't (v1.8.0 and older): drop it, it would fail every baseline (Errata L2).
+if [[ -f "$INSTALL_DIR/VERSION" && "$(cat "$INSTALL_DIR/VERSION")" != "$current" ]]; then
+    rm -f "$INSTALL_DIR/VERSION"
+fi
 [[ -f "$INSTALL_DIR/VERSION" ]] || base_want=""
 if ! base="$(health "$base_want")"; then
     finish_run waiting false "the box isn't healthy before updating ($base); staying at $current"
@@ -195,19 +203,29 @@ if ! bash "$INSTALL_DIR/update.sh" --auto "$candidate" >"$STATE_DIR/last-update.
     fi
 fi
 
+# Healthy: the run succeeds, names $candidate, and pushes no fewer lines than the baseline. One
+# retry a minute later before rolling back: a Pane blip between the two checks shouldn't cost a
+# good release (Errata L3). The baseline already showed this box reaches Pane.
 reason=""
-if after="$(health "$candidate")"; then
-    if (( after >= base )); then
-        finish_run updated true "$current -> $candidate ($after lines, baseline $base)"
+for attempt in 1 2; do
+    if after="$(health "$candidate")"; then
+        if (( after >= base )); then
+            finish_run updated true "$current -> $candidate ($after lines, baseline $base)"
+        fi
+        reason="it pushed $after lines, fewer than the $base before"
+    else
+        reason="$after"
     fi
-    reason="it pushed $after lines, fewer than the $base before"
-else
-    reason="$after"
-fi
+    if [[ "$attempt" == 1 ]]; then
+        log "the check after $candidate failed ($reason); checking again in ${RETRY_S}s"
+        sleep "$RETRY_S"
+    fi
+done
 
 # --- rollback, with the previous release's own finish ---------------------------------------
 log "unhealthy after $candidate: $reason; rolling back to $current"
 printf '%s\n' "$candidate" >>"$STATE_DIR/bad"
+rm -f "$INSTALL_DIR/VERSION"   # the old finish writes it again if it knows how (Errata L2)
 if g checkout -q --force "refs/tags/$current" 2>"$tmp/err" \
    && bash "$INSTALL_DIR/update.sh" --finish "$current" >>"$STATE_DIR/last-update.log" 2>&1; then
     finish_run rolled_back false "$candidate was unhealthy ($reason); back at $current, and $candidate is skipped until a newer release"

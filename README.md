@@ -157,8 +157,9 @@ later. It's changed by PR like any code, and reaches a box's trusted copy only t
 
 ### Unattended updates (OPS-75)
 
-`autoupdate.sh` is the box's self-updater. install.sh copies it outside the checkout and a timer
-runs it about hourly as root (or SYSTEM). Living outside the checkout means a broken release can't
+`autoupdate.sh` is the box's self-updater. install.sh will copy it outside the checkout and a timer
+will run it about hourly as root (or SYSTEM); that wiring is OPS-75 part B, released together with
+this file, so until then nothing runs it. Living outside the checkout means a broken release can't
 break the thing that rolls it back. Each run:
 
 1. reads the ring from `.env`: `TELEMETRY_UPDATE_RING=canary|main|off` (default `main`);
@@ -169,7 +170,8 @@ break the thing that rolls it back. Each run:
 5. runs telemetry once as a baseline (an unhealthy box isn't updated);
 6. runs `update.sh --auto <tag>`, so every signature, moved-tag and on-main check applies;
 7. checks the new run: it succeeds, prints `telemetry <tag>`, and pushes no fewer lines than the
-   baseline;
+   baseline (after the version line), with one retry a minute later. On Windows the check is one
+   telemetry cycle run in the foreground as SYSTEM, not the service's log;
 8. if not, checks the previous tag back out and runs *that* release's own finish, and skips the bad
    tag until a newer one appears;
 9. writes the `telemetry-update` heartbeat, which Pane shows with the others: not ok after a
