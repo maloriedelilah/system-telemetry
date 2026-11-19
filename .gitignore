@@ -21,3 +21,7 @@ venv/
 .vscode/
 *.swp
 *.tar.gz
+
+# The release this checkout runs (update.sh writes it)
+VERSION
+VERSION.tmp

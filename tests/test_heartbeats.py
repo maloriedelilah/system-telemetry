@@ -199,6 +199,8 @@ def _cycle(pane_url, hb_dir, host):
     config.TELEMETRY_HOST, config.IS_LINUX = host is not None, True
     main.linux_host.read_host = lambda: host
     config.HEARTBEATS_DIR = hb_dir
+    # The self-updater's folder is read whenever it exists; keep the box running the tests out of it.
+    config.UPDATER_HEARTBEAT_DIR = os.path.join(tempfile.mkdtemp(), "no-updater-here")
 
 
 def test_run_once_pushes_heartbeats_with_host_lines():
@@ -266,6 +268,49 @@ def test_off_by_default_reads_nothing():
     finally:
         main.heartbeats.read_all = real
         p.stop()
+
+
+def test_updater_heartbeat_folder_is_read_whenever_it_exists():
+    # OPS-75: autoupdate.sh writes telemetry-update.json; every box reads it, HEARTBEATS_DIR or not.
+    p = FakePane()
+    try:
+        _cycle(p.url, "", {"ram": {"used_gb": 1.0, "total_gb": 2.0, "pct": 50.0}})
+        up = tempfile.mkdtemp()
+        with open(os.path.join(up, "telemetry-update.json"), "w") as f:
+            json.dump({"version": 1, "checks": [{"check": "telemetry-update", "last_ok": int(time.time()),
+                                                 "period_s": 7200, "ok": True}]}, f)
+        config.UPDATER_HEARTBEAT_DIR = up
+        with Capture():
+            assert main.run_once() is True
+        assert "heartbeat,check=telemetry-update ok=1" in p.bodies[-1], p.bodies[-1]
+    finally:
+        p.stop()
+
+
+def test_heartbeat_folders_both_and_no_duplicate():
+    a, b = tempfile.mkdtemp(), tempfile.mkdtemp()
+    config.HEARTBEATS_DIR, config.UPDATER_HEARTBEAT_DIR = a, b
+    assert main.heartbeat_folders() == [a, b]
+    config.UPDATER_HEARTBEAT_DIR = a
+    assert main.heartbeat_folders() == [a]
+    config.HEARTBEATS_DIR, config.UPDATER_HEARTBEAT_DIR = "", os.path.join(b, "missing")
+    assert main.heartbeat_folders() == []
+
+
+def test_version_comes_from_the_version_file():
+    # update.sh's finish writes VERSION; telemetry prints "telemetry <tag>" for the updater's check.
+    real = config.INSTALL_DIR
+    d = tempfile.mkdtemp()
+    try:
+        config.INSTALL_DIR = d
+        assert config._version() == "unknown"          # no file
+        for text, want in (("v1.9.0\n", "v1.9.0"), ("v1.09.0\n", "unknown"), ("rm -rf /\n", "unknown"),
+                           ("v1.9.0 extra", "unknown")):
+            with open(os.path.join(d, "VERSION"), "w") as f:
+                f.write(text)
+            assert config._version() == want, (text, config._version())
+    finally:
+        config.INSTALL_DIR = real
 
 
 if __name__ == "__main__":

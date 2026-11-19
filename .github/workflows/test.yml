@@ -48,6 +48,8 @@ jobs:
         run: for f in *.sh; do bash -n "$f"; done
       - name: update.sh against a local repo standing in for GitHub
         run: sudo bash tests/test_update.sh
+      - name: autoupdate.sh (the unattended updater, OPS-75) against the same kind of stand-in
+        run: sudo bash tests/test_autoupdate.sh
       - name: Every script is executable in git (100755)
         run: |
           bad="$(git ls-files -s -- '*.sh' | awk '$1 != "100755" { print $4 }')"

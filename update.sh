@@ -96,6 +96,8 @@ g() { git "${GITC[@]}" -C "$INSTALL_DIR" "$@"; }
 # --- finish: runs as the NEW update.sh, after the checkout ------------------
 finish() {
     local tag="$1" py owner
+    # The release this checkout runs, for telemetry's start-up line and the self-updater (OPS-75).
+    printf '%s\n' "$tag" >"$INSTALL_DIR/VERSION.tmp" && mv -f "$INSTALL_DIR/VERSION.tmp" "$INSTALL_DIR/VERSION"
     SO_FAR="checked out $tag; the deps and the service aren't refreshed yet"
     NEXT_ON_ERR="fix the cause, then run ./update.sh again: it finishes $tag (it knows the last finish didn't complete)."
     if [[ "${TELEMETRY_SKIP_SERVICE:-0}" == 1 ]]; then
