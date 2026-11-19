@@ -165,7 +165,8 @@ health() {   # want_version
         nssm restart "$SERVICE_NAME" >/dev/null 2>&1 || true
         while (( waited < HEALTH_WAIT_S )); do
             sleep 5; waited=$((waited + 5))
-            out="$(tail -c +"$((from + 1))" "$logf" 2>/dev/null || true)"
+            # Python on Windows writes CRLF; the line checks below want bare lines.
+            out="$(tail -c +"$((from + 1))" "$logf" 2>/dev/null | tr -d '\r' || true)"
             grep -q '^Pane: pushed ' <<<"$out" && break
         done
     fi
