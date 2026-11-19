@@ -321,7 +321,9 @@ elevated prompt:
 icacls C:\ProgramData\telemetry\secrets /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F"
 ```
 
-(The installer doesn't create or touch this folder on Windows.)
+From the release with the self-updater (OPS-75), install.sh does this itself: it locks
+`secrets\` (and the install dir, which SYSTEM runs) to SYSTEM and Administrators, with
+Administrators as owner, and stops if icacls fails.
 
 ### What is sent
 

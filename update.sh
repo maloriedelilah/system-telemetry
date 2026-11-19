@@ -92,7 +92,9 @@ verkey() { printf '%s\n' "$1" | awk '{ split(substr($0, 2), p, "."); printf "%01
 # Repository hooks, fsmonitor and ext:: never run in an update (it runs as root / admin). On Linux the
 # install dir must be root's (checked below), so git's own ownership check stays on; Git for Windows
 # can't compare an Administrators-owned folder with an admin user, so there it's marked safe.
-GITC=(-c core.hooksPath=/dev/null -c core.fsmonitor=false -c protocol.ext.allow=never)
+# safe.directory: SYSTEM (the Windows self-updater) runs git in a checkout Administrators own;
+# Linux already refuses a checkout root doesn't own (Errata, OPS-75 L3b).
+GITC=(-c core.hooksPath=/dev/null -c core.fsmonitor=false -c protocol.ext.allow=never -c safe.directory="$INSTALL_DIR")
 [[ "$OS" == windows ]] && GITC+=(-c "safe.directory=$INSTALL_DIR")
 gx() { git "${GITC[@]}" "$@"; }
 g() { git "${GITC[@]}" -C "$INSTALL_DIR" "$@"; }
@@ -138,6 +140,10 @@ finish() {
     else
         STEP="nssm restart $SERVICE_NAME"
         nssm restart "$SERVICE_NAME"
+        # The self-updater's health check runs its own cycle, so a service still on the old code
+        # would go unnoticed without this (Errata, OPS-75 L3a).
+        STEP="nssm status $SERVICE_NAME"
+        [[ "$(nssm status "$SERVICE_NAME" 2>/dev/null | tr -d '\r')" == SERVICE_RUNNING ]]
         printf '%s\n' "$tag" >"$FINISHED"
         say "Done: telemetry $tag. Logs: $INSTALL_DIR/logs/telemetry.err.log"
     fi
@@ -202,15 +208,23 @@ if [[ -e "$SIGNERS" ]]; then
     if [[ "$OS" == windows ]]; then
         # The folder and the file itself (an ACE added on the file wouldn't show on the folder), and
         # an icacls that fails is a refusal, not a pass (Errata, OPS-77 Lows).
+        # An allowlist, not a denylist (Errata, OPS-75 L2): every ACE must be SYSTEM, Administrators,
+        # TrustedInstaller or CREATOR OWNER, on the folder and on the file itself, and the owner
+        # Administrators or SYSTEM. An icacls that fails is a refusal, not a pass (OPS-77).
         for target in "$(dirname "$SIGNERS")" "$SIGNERS"; do
-            if ! acl="$(MSYS_NO_PATHCONV=1 icacls "$(cygpath -w "$target")" 2>&1)"; then
-                report "could not read the trusted signers' permissions" "icacls $target" "its ACL" "$(tr '\n' ' ' <<<"$acl" | cut -c1-200)" \
+            wt="$(cygpath -w "$target")"
+            if ! acl="$(MSYS_NO_PATHCONV=1 icacls "$wt" 2>&1)"; then
+                report "could not read the trusted signers' permissions" "icacls $wt" "its ACL" "$(tr '\n' ' ' <<<"$acl" | cut -c1-200)" \
                     "run this from an elevated Git Bash; if it still fails, tell Hopper. Nothing was changed."
                 exit 2
             fi
-            if grep -Eqi '\\Users:|Everyone:|Authenticated Users:' <<<"$acl"; then
-                report "the trusted signers aren't locked down" "icacls $target" "SYSTEM and Administrators only" \
-                    "$(grep -Ei '\\Users:|Everyone:|Authenticated Users:' <<<"$acl" | tr -s ' ' | tr '\n' ';')" \
+            others="$(tr -d '\r' <<<"$acl" | grep ':(' | sed "s|^$(printf '%s' "$wt" | sed 's/[][\\.*^$|]/\\&/g')||; s|^[[:space:]]*||; s|:(.*||" \
+                | grep -viE '^(NT AUTHORITY\\SYSTEM|BUILTIN\\Administrators|NT SERVICE\\TrustedInstaller|CREATOR OWNER)$' || true)"
+            owner="$(powershell.exe -NoProfile -Command "(Get-Acl -LiteralPath '$wt').Owner" 2>/dev/null | tr -d '\r' || true)"
+            if [[ -n "$others" || ! "$owner" =~ ^(BUILTIN\\Administrators|NT\ AUTHORITY\\SYSTEM)$ ]]; then
+                report "the trusted signers aren't locked down" "icacls and Get-Acl on $wt" \
+                    "only SYSTEM, Administrators, TrustedInstaller or CREATOR OWNER, owned by Administrators or SYSTEM" \
+                    "owner ${owner:-unknown}; others: $(tr '\n' ';' <<<"${others:-none}")" \
                     "rerun ./install.sh from an elevated Git Bash (it locks secrets\\ again), then run ./update.sh again."
                 exit 2
             fi

@@ -617,13 +617,27 @@ if [[ "$OS" == windows ]]; then
     say "Starting service (runs as LocalSystem — the venv makes that sufficient)…"
     nssm start "$SERVICE_NAME" 2>/dev/null || nssm restart "$SERVICE_NAME"
 
+    # SYSTEM runs this checkout (the service, and the hourly self-updater), so nobody but SYSTEM
+    # and Administrators may change a byte of it: a folder made under C:\ inherits "Authenticated
+    # Users: Modify", which would let any signed-in user edit update.sh or .git/config and run as
+    # SYSTEM on the next hourly run (Errata, OPS-75 B1). Users keep read access. The owner moves to
+    # Administrators too, since an owner can always rewrite the ACL. MSYS would turn icacls' and
+    # schtasks' /switches into paths, hence MSYS_NO_PATHCONV.
+    lock_dir() {   # dir, extra grants...
+        local d="$1"; shift
+        MSYS_NO_PATHCONV=1 icacls "$(win "$d")" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "$@" /T /C /Q >/dev/null \
+            && MSYS_NO_PATHCONV=1 icacls "$(win "$d")" /setowner "*S-1-5-32-544" /T /C /Q >/dev/null \
+            || die "could not lock $(win "$d") to SYSTEM and Administrators (icacls failed); nothing past the service was set up."
+    }
+    lock_dir "$INSTALL_DIR" "*S-1-5-32-545:(OI)(CI)RX"
+    say "Locked $(win "$INSTALL_DIR"): SYSTEM and Administrators change it, Users read it."
+
     # The trusted release keys and the self-updater (OPS-75), in secrets\ (SYSTEM and
-    # Administrators only: ProgramData's default ACL lets any user create files beside it).
+    # Administrators only: ProgramData's default ACL lets any user create files beside it, and
+    # whoever made the folder first would still own it).
     SECRETS=/c/ProgramData/telemetry/secrets
     mkdir -p "$SECRETS/bin" "$SECRETS/state" "$SECRETS/heartbeat"
-    # MSYS would turn icacls' and schtasks' /switches into paths.
-    MSYS_NO_PATHCONV=1 icacls "$(win "$SECRETS")" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" >/dev/null \
-        || die "could not lock $(win "$SECRETS") to SYSTEM and Administrators (icacls failed)."
+    lock_dir "$SECRETS"
     if [[ -f "$INSTALL_DIR/allowed_signers" ]] && grep -qE '^[^#[:space:]]' "$INSTALL_DIR/allowed_signers"; then
         cp -f "$INSTALL_DIR/allowed_signers" "$SECRETS/allowed_signers"
         say "Trusted release keys: $(grep -cE '^[^#[:space:]]' "$SECRETS/allowed_signers") in $(win "$SECRETS/allowed_signers")."
@@ -641,8 +655,12 @@ for kind in out err; do
     ls -1t "$INSTALL_DIR/logs/telemetry.\$kind-"*.log 2>/dev/null | tail -n +6 | while IFS= read -r f; do rm -f -- "\$f"; done
 done
 export TELEMETRY_DIR="$INSTALL_DIR"
+# SYSTEM's own PATH may not include NSSM (a per-user install, say); update.sh restarts the
+# service with it (Errata, OPS-75 L3a).
+export PATH="$(dirname "$(command -v nssm)"):\$PATH"
 exec bash "$SECRETS/bin/autoupdate.sh" >>"\$log" 2>&1
 WRAP
+        lock_dir "$SECRETS"   # the new files inherit, but say so explicitly
         BASH_W="$(win "$(command -v bash)")"
         MSYS_NO_PATHCONV=1 schtasks /Create /F /TN "system-telemetry-autoupdate" /RU SYSTEM /RL HIGHEST /SC HOURLY \
             /TR "\"$BASH_W\" -l $SECRETS/bin/run-autoupdate.sh" >/dev/null \
