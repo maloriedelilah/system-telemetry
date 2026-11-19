@@ -19,8 +19,12 @@ trap 'rm -rf "$work" "$out"; userdel "$USER_T" 2>/dev/null || true' EXIT
 box="$work/box"
 mkdir -p "$box"
 chmod 0755 "$work" "$box"   # so the run user can reach secrets/ (as it can under /opt/telemetry)
-cp -r "$SRC/install.sh" "$SRC/service" "$SRC/requirements.txt" "$box/"
+cp -r "$SRC/install.sh" "$SRC/service" "$SRC/requirements.txt" "$SRC/autoupdate.sh" "$SRC/allowed_signers" "$box/"
 export TELEMETRY_SKIP_SERVICE=1
+# The updater pieces land outside the box (OPS-75); point them at the test's own folders.
+mkdir -p "$work/units" "$work/sbin" "$work/etc"
+export TELEMETRY_UNIT_DIR="$work/units" TELEMETRY_SBIN="$work/sbin" \
+       TELEMETRY_ALLOWED_SIGNERS="$work/etc/allowed_signers" TELEMETRY_UPDATER_HEARTBEAT_DIR="$work/hb"
 URL="http://100.92.61.42:8427"
 TOKEN="pw_$(head -c 30 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 40)"
 run() { bash "$box/install.sh" "$@" >"$out" 2>&1; }
@@ -144,6 +148,39 @@ printf '%s\n' "$TOKEN" | run --profile host --pane-url "$URL" --run-user "$USER_
 check "planted directory: the token is a plain file" test -f "$box/secrets/pane_token" -a ! -L "$box/secrets/pane_token"
 check "planted directory: holding the token" test "$(cat "$box/secrets/pane_token")" = "$TOKEN"
 
+echo "== the trusted release keys and the self-updater are placed outside the box (OPS-75)"
+check "allowed_signers copied" cmp -s "$box/allowed_signers" "$work/etc/allowed_signers"
+check "root's, 0644" test "$(stat -c '%U %a' "$work/etc/allowed_signers")" = "root 644"
+check "the runner copied" cmp -s "$box/autoupdate.sh" "$work/sbin/telemetry-autoupdate"
+check "root's, 0755" test "$(stat -c '%U %a' "$work/sbin/telemetry-autoupdate")" = "root 755"
+check "the updater unit names this install dir" grep -qx "Environment=TELEMETRY_DIR=$box" "$work/units/telemetry-autoupdate.service"
+check "and its timer is there" test -f "$work/units/telemetry-autoupdate.timer"
+check "the heartbeat folder exists, root's 0755" test "$(stat -c '%U %a' "$work/hb")" = "root 755"
+
+echo "== --ring sets the update ring; a rerun keeps it; a new --ring replaces it (OPS-75)"
+printf '%s\n' "$TOKEN" | run --profile host --pane-url "$URL" --run-user "$USER_T" --token-stdin --ring canary \
+    || fail "--ring canary failed" "$(tail -n 6 "$out")"
+check "--ring canary is in .env" envis 'TELEMETRY_UPDATE_RING=canary'
+check "it says so" has 'Update ring: canary'
+run --profile host --pane-url "$URL" --run-user "$USER_T" || fail "a rerun failed" "$(tail -n 6 "$out")"
+check "a fleet rerun keeps canary" envis 'TELEMETRY_UPDATE_RING=canary'
+run --profile host --pane-url "$URL" --run-user "$USER_T" --ring off || fail "--ring off failed" "$(tail -n 6 "$out")"
+check "--ring off replaces it" envis 'TELEMETRY_UPDATE_RING=off'
+check "with just one ring line" test "$(grep -c '^TELEMETRY_UPDATE_RING=' "$box/.env")" = 1
+check ".env is still 0600 and the run user's" test "$(stat -c '%a %U' "$box/.env")" = "600 $USER_T"
+run --profile host --pane-url "$URL" --run-user "$USER_T" --ring main || fail "--ring main failed" "$(tail -n 6 "$out")"
+
+echo "== a rerun without --run-user keeps the unit's run user (keystone, Nov 18)"
+printf '[Service]\nUser=%s\n' "$USER_T" >"$work/units/system-telemetry.service"
+run --profile host --pane-url "$URL" || fail "a rerun without --run-user failed" "$(tail -n 6 "$out")"
+check "it says it kept the unit's user" has "Run user: $USER_T (kept from the installed unit"
+check "the token stays the run user's" test "$(stat -c %U "$box/secrets/pane_token")" = "$USER_T"
+check ".env stays the run user's" test "$(stat -c %U "$box/.env")" = "$USER_T"
+printf '[Service]\nUser=no-such-user-%s\n' "$$" >"$work/units/system-telemetry.service"
+run --profile host --pane-url "$URL" --run-user "$USER_T" || fail "a rerun with a stale unit failed" "$(tail -n 6 "$out")"
+check "a unit naming a missing user isn't trusted; --run-user wins" test "$(stat -c %U "$box/secrets/pane_token")" = "$USER_T"
+rm -f "$work/units/system-telemetry.service"
+
 echo "== an install dir the run user owns is refused (as update.sh refuses it), and nothing changes"
 cp "$box/.env" "$work/env.owned"
 chown "$USER_T" "$box"
@@ -164,6 +201,7 @@ expect_refused() { # name title-fragment [stdin] -- args...
     check "$name kept the token" test "$(cat "$box/secrets/pane_token")" = "$before_tok"
 }
 expect_refused "an unknown profile" '!!! unknown profile' '' -- --profile desktop --pane-url "$URL"
+expect_refused "an unknown ring" '!!! unknown --ring' '' -- --profile host --pane-url "$URL" --ring fast
 expect_refused "a URL with userinfo" '!!! not a Pane URL' '' -- --profile host --pane-url "http://$TOKEN@100.92.61.42:8427"
 expect_refused "a URL with a path" '!!! not a Pane URL' '' -- --profile host --pane-url "$URL/influx/write"
 expect_refused "no URL" '!!! not a Pane URL' '' -- --profile host

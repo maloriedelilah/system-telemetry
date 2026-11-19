@@ -200,13 +200,21 @@ if [[ -e "$SIGNERS" ]]; then
         exit 2
     fi
     if [[ "$OS" == windows ]]; then
-        acl="$(icacls "$(cygpath -w "$(dirname "$SIGNERS")")" 2>&1 || true)"
-        if grep -Eqi '\\Users:|Everyone:|Authenticated Users:' <<<"$acl"; then
-            report "the trusted signers folder isn't locked down" "icacls $(dirname "$SIGNERS")" "SYSTEM and Administrators only" \
-                "$(grep -Ei '\\Users:|Everyone:|Authenticated Users:' <<<"$acl" | tr -s ' ' | tr '\n' ';')" \
-                "lock it as the README's First install does (icacls ... /inheritance:r /grant:r SYSTEM and Administrators), then run ./update.sh again."
-            exit 2
-        fi
+        # The folder and the file itself (an ACE added on the file wouldn't show on the folder), and
+        # an icacls that fails is a refusal, not a pass (Errata, OPS-77 Lows).
+        for target in "$(dirname "$SIGNERS")" "$SIGNERS"; do
+            if ! acl="$(MSYS_NO_PATHCONV=1 icacls "$(cygpath -w "$target")" 2>&1)"; then
+                report "could not read the trusted signers' permissions" "icacls $target" "its ACL" "$(tr '\n' ' ' <<<"$acl" | cut -c1-200)" \
+                    "run this from an elevated Git Bash; if it still fails, tell Hopper. Nothing was changed."
+                exit 2
+            fi
+            if grep -Eqi '\\Users:|Everyone:|Authenticated Users:' <<<"$acl"; then
+                report "the trusted signers aren't locked down" "icacls $target" "SYSTEM and Administrators only" \
+                    "$(grep -Ei '\\Users:|Everyone:|Authenticated Users:' <<<"$acl" | tr -s ' ' | tr '\n' ';')" \
+                    "rerun ./install.sh from an elevated Git Bash (it locks secrets\\ again), then run ./update.sh again."
+                exit 2
+            fi
+        done
     fi
 elif [[ -e "$VERIFIED_MARK" ]]; then
     report "the trusted signers file is gone" "looked for $SIGNERS" "the allowed-signers file (this box has installed verified releases since $(cat "$VERIFIED_MARK" 2>/dev/null))" \

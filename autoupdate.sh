@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # autoupdate.sh — the unattended updater (OPS-75).
 #
-# install.sh will copy this OUTSIDE the checkout (/usr/local/sbin/telemetry-autoupdate, or
-# C:\ProgramData\telemetry\bin\autoupdate.sh) and a timer will run it about hourly as root (or
-# SYSTEM): that's OPS-75 part B, which ships in the same release as this file. Until then nothing
-# runs it.
+# install.sh copies this OUTSIDE the checkout (/usr/local/sbin/telemetry-autoupdate, or
+# C:\ProgramData\telemetry\secrets\bin\autoupdate.sh) and a timer (telemetry-autoupdate.timer) or
+# SYSTEM scheduled task (system-telemetry-autoupdate) runs it about hourly.
 # Living outside the checkout means a broken release can't break the thing that rolls it back.
 #
 # Each run:
