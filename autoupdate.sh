@@ -163,12 +163,13 @@ health() {   # want_version
         out="$(journalctl -u "${SERVICE_NAME}.service" --since "$since" -o cat --no-pager 2>/dev/null || true)"
         [[ "$res" == success ]] || { echo "the run's Result is ${res:-unknown}"; return 1; }
     else
-        # Windows: one telemetry cycle in the foreground, as SYSTEM like the NSSM service and with
-        # the same .env, but LOOP_INTERVAL emptied (the environment wins over .env), so it runs
-        # once and exits. Its own output and exit code are the evidence: no service log to tail, so
+        # Windows: one telemetry cycle in the foreground (--once), as SYSTEM like the NSSM service
+        # and with the same .env, so it runs once and exits. Its own output and exit code are the evidence: no service log to tail, so
         # NSSM's log rotation and the old process's last lines can't confuse it (Errata B2, L1).
         local py="$INSTALL_DIR/venv/Scripts/python.exe" rc=0
-        out="$(cd "$INSTALL_DIR" && LOOP_INTERVAL="" timeout "$HEALTH_WAIT_S" "$py" -m telemetry 2>&1 | tr -d '\r')" || rc=$?
+        # --once (this release on) runs one cycle whatever LOOP_INTERVAL says; the blank variable is
+        # a second guard, in case Git Bash passes it through.
+        out="$(cd "$INSTALL_DIR" && LOOP_INTERVAL="" timeout "$HEALTH_WAIT_S" "$py" -m telemetry --once 2>&1 | tr -d '\r')" || rc=$?
         (( rc == 0 )) || { echo "the run exited $rc"; return 1; }
     fi
     if [[ -n "$want" ]] && ! grep -qxF "telemetry $want" <<<"$out"; then

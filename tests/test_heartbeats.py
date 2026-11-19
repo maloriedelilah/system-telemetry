@@ -313,6 +313,17 @@ def test_version_comes_from_the_version_file():
         config.INSTALL_DIR = real
 
 
+def test_once_runs_one_cycle_even_in_loop_mode():
+    # OPS-80: the Windows health check runs "python -m telemetry --once" with .env's LOOP_INTERVAL=30.
+    env = dict(os.environ, LOOP_INTERVAL="30", PANE_URL="", MQTT_HOST="", TELEMETRY_NVIDIA="0",
+               TELEMETRY_LHM="0", TELEMETRY_HOST="0", HEARTBEATS_DIR="",
+               TELEMETRY_UPDATER_HEARTBEAT_DIR=os.path.join(tempfile.mkdtemp(), "none"))
+    r = subprocess.run([sys.executable, "-m", "telemetry", "--once"], env=env, cwd=ROOT,
+                       capture_output=True, text=True, timeout=60)
+    assert "Loop mode" not in r.stdout, r.stdout
+    assert r.stdout.splitlines()[0].startswith("telemetry "), r.stdout
+
+
 if __name__ == "__main__":
     failed = 0
     for name, fn in list(globals().items()):

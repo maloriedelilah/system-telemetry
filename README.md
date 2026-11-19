@@ -171,7 +171,7 @@ break the thing that rolls it back. Each run:
 6. runs `update.sh --auto <tag>`, so every signature, moved-tag and on-main check applies;
 7. checks the new run: it succeeds, prints `telemetry <tag>`, and pushes no fewer lines than the
    baseline (after the version line), with one retry a minute later. On Windows the check is one
-   telemetry cycle run in the foreground as SYSTEM, not the service's log;
+   telemetry cycle run in the foreground (`python -m telemetry --once`) as SYSTEM, not the service's log;
 8. if not, checks the previous tag back out and runs *that* release's own finish, and skips the bad
    tag until a newer one appears;
 9. writes the `telemetry-update` heartbeat, which Pane shows with the others: not ok after a

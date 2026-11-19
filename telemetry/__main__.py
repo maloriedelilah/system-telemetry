@@ -220,7 +220,10 @@ def publish_mqtt(gpus, models, host):
 def main():
     # The self-updater's health check reads this line to confirm the new release is the one running.
     print(f"telemetry {config.VERSION}", flush=True)
-    if config.LOOP_INTERVAL:
+    # --once: one cycle and exit, whatever LOOP_INTERVAL says. The self-updater's Windows health
+    # check uses it; an empty environment variable may not survive Git Bash starting a Windows
+    # program, so it can't rely on blanking LOOP_INTERVAL (Errata, OPS-80).
+    if config.LOOP_INTERVAL and "--once" not in sys.argv[1:]:
         interval = float(config.LOOP_INTERVAL)
         print(f"Loop mode: publishing every {interval}s. Ctrl-C to stop.",
               flush=True)
