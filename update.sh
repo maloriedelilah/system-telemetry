@@ -42,6 +42,10 @@
 #                              or C:\ProgramData\telemetry\secrets\state)
 # ---------------------------------------------------------------------------
 set -Eeuo pipefail
+# Every pattern here ([!-~], [0-9], [a-z]) means ASCII. Under a locale such as en_US.UTF-8, bash's
+# =~ takes ranges from the collation order instead, and [!-~] then refused every real Pane token
+# (Nov 13, the first box after pane). Assigning LC_ALL makes bash switch locale right here.
+export LC_ALL=C
 
 SERVICE_NAME="system-telemetry"
 INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -96,6 +100,8 @@ g() { git "${GITC[@]}" -C "$INSTALL_DIR" "$@"; }
 # --- finish: runs as the NEW update.sh, after the checkout ------------------
 finish() {
     local tag="$1" py owner
+    # The release this checkout runs, for telemetry's start-up line and the self-updater (OPS-75).
+    printf '%s\n' "$tag" >"$INSTALL_DIR/VERSION.tmp" && mv -f "$INSTALL_DIR/VERSION.tmp" "$INSTALL_DIR/VERSION"
     SO_FAR="checked out $tag; the deps and the service aren't refreshed yet"
     NEXT_ON_ERR="fix the cause, then run ./update.sh again: it finishes $tag (it knows the last finish didn't complete)."
     if [[ "${TELEMETRY_SKIP_SERVICE:-0}" == 1 ]]; then

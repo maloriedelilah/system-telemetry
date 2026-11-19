@@ -62,7 +62,7 @@ writes `.env`, builds the venv and registers the service: a **systemd timer** on
 above with one line that `add-box.sh` prints. Under the hood it runs:
 
 ```bash
-sudo ./install.sh --profile host|gpu|vm --pane-url http://<pane>:8427 --run-user telemetry --token-stdin
+sudo ./install.sh --profile host|gpu|vm --pane-url http://<pane>:8427 --run-user telemetry --token-stdin [--sites]
 ```
 
 `host` is CPU/RAM/disk and `vm` is for VMs. GPUs and their loaded models are found on their own
@@ -70,7 +70,10 @@ on any profile (see Loaded-model labels), so `gpu` and `--models` are no longer 
 still accepted. MQTT is off in every profile.
 The profile rewrites `.env` each time, so rerunning the same line puts a drifted box back on
 the standard. `--token-stdin` reads the Pane token on stdin and saves it 0400 for the run user.
-Missing `git`, `python3-venv` or `python3-pip` are installed first.
+Missing `git`, `python3-venv` or `python3-pip` are installed first. `--sites` turns on the
+public-site probes (pane only; see Site probes below) and `--no-sites` turns them off; with
+neither, a rerun or `--reconfigure` keeps whatever `.env` already says. Fleet mode needs the install dir to be
+root's, as update.sh does.
 
 Re-run to reconfigure:
 
@@ -155,6 +158,30 @@ main hasn't changed since the last release. Boxes pick up the newest tag with `.
 later. It's changed by PR like any code, and reaches a box's trusted copy only through
 `./install.sh` (run by hand) or a release signed by a key the box already trusts.
 
+### Unattended updates (OPS-75)
+
+`autoupdate.sh` is the box's self-updater. install.sh will copy it outside the checkout and a timer
+will run it about hourly as root (or SYSTEM); that wiring is OPS-75 part B, released together with
+this file, so until then nothing runs it. Living outside the checkout means a broken release can't
+break the thing that rolls it back. Each run:
+
+1. reads the ring from `.env`: `TELEMETRY_UPDATE_RING=canary|main|off` (default `main`);
+2. reads main's tip: an `AUTOUPDATE_PAUSED` file there stops every box, canaries too; `PROMOTED`
+   lists the tags the main ring may take, one per line;
+3. picks the newest release above the installed one that isn't on the box's bad list;
+4. main ring: only a tag in `PROMOTED`, and only 24 h after the box first saw it; canary: at once;
+5. runs telemetry once as a baseline (an unhealthy box isn't updated);
+6. runs `update.sh --auto <tag>`, so every signature, moved-tag and on-main check applies;
+7. checks the new run: it succeeds, prints `telemetry <tag>`, and pushes no fewer lines than the
+   baseline (after the version line), with one retry a minute later. On Windows the check is one
+   telemetry cycle run in the foreground (`python -m telemetry --once`) as SYSTEM, not the service's log;
+8. if not, checks the previous tag back out and runs *that* release's own finish, and skips the bad
+   tag until a newer one appears;
+9. writes the `telemetry-update` heartbeat, which Pane shows with the others: not ok after a
+   failure or rollback, and late when the updater stops running.
+
+Promoting a release past the canaries is a one-line PR adding its tag to `PROMOTED`.
+
 ## Layout
 
 ```
@@ -172,6 +199,7 @@ update.sh           move to the newest signed release tag (deploy key) + deps + 
 release.sh          maintainer: sign and push the tag vX.Y.Z on main, publish the release
 allowed_signers     the keys whose release tags boxes install (OPS-75)
 requirements.lock   exact pins + sha256 of every file; what finish installs (tools/lock.py writes it)
+autoupdate.sh       the unattended updater: rings, PROMOTED, health check, rollback (OPS-75)
 sites.txt           the public sites pane probes (TELEMETRY_SITES=1)
 .env.example        config schema reference (the installer writes the real .env)
 service/            systemd unit/timer + NSSM reference

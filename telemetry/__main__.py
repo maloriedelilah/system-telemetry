@@ -18,6 +18,7 @@ Unset -> single shot (systemd timer on Linux).
 Run:  python -m telemetry
 """
 
+import os
 import sys
 import time
 
@@ -33,6 +34,14 @@ from . import sites
 from . import heartbeats
 
 dbg = config.dbg
+
+
+def heartbeat_folders():
+    """HEARTBEATS_DIR when set, and the self-updater's folder whenever it exists (OPS-75)."""
+    folders = [d for d in (config.HEARTBEATS_DIR,) if d]
+    if os.path.isdir(config.UPDATER_HEARTBEAT_DIR) and config.UPDATER_HEARTBEAT_DIR not in folders:
+        folders.append(config.UPDATER_HEARTBEAT_DIR)
+    return folders
 
 
 def run_once():
@@ -74,11 +83,11 @@ def run_once():
     # Status files from occasional jobs go to Pane only. Fenced off like an output: a bug here must
     # not cost the host and GPU data.
     beats = []
-    if config.HEARTBEATS_DIR:
+    for folder in heartbeat_folders():
         try:
-            beats = heartbeats.read_all()
+            beats += heartbeats.read_all(folder)
         except Exception as e:
-            config.report("Heartbeat files crashed", f"read {config.HEARTBEATS_DIR}",
+            config.report("Heartbeat files crashed", f"read {folder}",
                           "one entry per check", f"{type(e).__name__}: {e}",
                           "this is a bug in telemetry/heartbeats.py; host and GPU data still go out")
 
@@ -209,7 +218,12 @@ def publish_mqtt(gpus, models, host):
 
 
 def main():
-    if config.LOOP_INTERVAL:
+    # The self-updater's health check reads this line to confirm the new release is the one running.
+    print(f"telemetry {config.VERSION}", flush=True)
+    # --once: one cycle and exit, whatever LOOP_INTERVAL says. The self-updater's Windows health
+    # check uses it; an empty environment variable may not survive Git Bash starting a Windows
+    # program, so it can't rely on blanking LOOP_INTERVAL (Errata, OPS-80).
+    if config.LOOP_INTERVAL and "--once" not in sys.argv[1:]:
         interval = float(config.LOOP_INTERVAL)
         print(f"Loop mode: publishing every {interval}s. Ctrl-C to stop.",
               flush=True)
