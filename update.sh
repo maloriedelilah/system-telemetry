@@ -83,6 +83,10 @@ case "$(uname -s)" in
                           DEFAULT_STATE=/c/ProgramData/telemetry/secrets/state ;;
     *) report "unsupported OS" "uname -s" "Linux or Git Bash on Windows" "$(uname -s)" "run it on a supported box."; exit 2 ;;
 esac
+# install.sh copies NSSM into secrets\bin (admin-only) and points the service at it, so the SYSTEM
+# task never looks NSSM up on a PATH (Errata, OPS-75 r2 B1). Before that install, PATH's NSSM.
+NSSM=nssm
+[[ "$OS" == windows && -x /c/ProgramData/telemetry/secrets/bin/nssm.exe ]] && NSSM=/c/ProgramData/telemetry/secrets/bin/nssm.exe
 KEY="${TELEMETRY_DEPLOY_KEY:-$DEFAULT_KEY}"
 SIGNERS="${TELEMETRY_ALLOWED_SIGNERS:-$DEFAULT_SIGNERS}"
 STATE_DIR="${TELEMETRY_STATE_DIR:-$DEFAULT_STATE}"
@@ -139,11 +143,18 @@ finish() {
         say "Done: telemetry $tag. Check: journalctl -u ${SERVICE_NAME}.service -n 20 --no-pager"
     else
         STEP="nssm restart $SERVICE_NAME"
-        nssm restart "$SERVICE_NAME"
+        "$NSSM" restart "$SERVICE_NAME"
         # The self-updater's health check runs its own cycle, so a service still on the old code
-        # would go unnoticed without this (Errata, OPS-75 L3a).
-        STEP="nssm status $SERVICE_NAME"
-        [[ "$(nssm status "$SERVICE_NAME" 2>/dev/null | tr -d '\r')" == SERVICE_RUNNING ]]
+        # would go unnoticed without this (Errata, OPS-75 L3a). START_PENDING is normal for a
+        # moment, so give it 20 s.
+        STEP="nssm status $SERVICE_NAME (waiting for SERVICE_RUNNING)"
+        local st=""
+        for _ in $(seq 1 20); do
+            st="$("$NSSM" status "$SERVICE_NAME" 2>/dev/null | tr -d '\r')"
+            [[ "$st" == SERVICE_RUNNING ]] && break
+            sleep 1
+        done
+        [[ "$st" == SERVICE_RUNNING ]]
         printf '%s\n' "$tag" >"$FINISHED"
         say "Done: telemetry $tag. Logs: $INSTALL_DIR/logs/telemetry.err.log"
     fi

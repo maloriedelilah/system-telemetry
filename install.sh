@@ -623,10 +623,16 @@ if [[ "$OS" == windows ]]; then
     # SYSTEM on the next hourly run (Errata, OPS-75 B1). Users keep read access. The owner moves to
     # Administrators too, since an owner can always rewrite the ACL. MSYS would turn icacls' and
     # schtasks' /switches into paths, hence MSYS_NO_PATHCONV.
+    # No /C: icacls stops at the first file it can't change and exits non-zero, and the summary is
+    # checked as well, so a partial lock is never taken for a whole one (Errata, OPS-75 L6).
+    icacls_all() {   # icacls arguments...
+        local o
+        o="$(MSYS_NO_PATHCONV=1 icacls "$@" 2>&1)" && ! grep -qE 'Failed processing [1-9]' <<<"$o"
+    }
     lock_dir() {   # dir, extra grants...
         local d="$1"; shift
-        MSYS_NO_PATHCONV=1 icacls "$(win "$d")" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "$@" /T /C /Q >/dev/null \
-            && MSYS_NO_PATHCONV=1 icacls "$(win "$d")" /setowner "*S-1-5-32-544" /T /C /Q >/dev/null \
+        icacls_all "$(win "$d")" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "$@" /T \
+            && icacls_all "$(win "$d")" /setowner "*S-1-5-32-544" /T \
             || die "could not lock $(win "$d") to SYSTEM and Administrators (icacls failed); nothing past the service was set up."
     }
     lock_dir "$INSTALL_DIR" "*S-1-5-32-545:(OI)(CI)RX"
@@ -638,6 +644,26 @@ if [[ "$OS" == windows ]]; then
     SECRETS=/c/ProgramData/telemetry/secrets
     mkdir -p "$SECRETS/bin" "$SECRETS/state" "$SECRETS/heartbeat"
     lock_dir "$SECRETS"
+
+    # NSSM from a folder only admins can write (Errata, OPS-75 r2 B1). A per-user NSSM (scoop's,
+    # say) sits in a folder Malorie's own account can write, so the service, and the SYSTEM task
+    # that restarts it, would run whatever an unelevated program put there. Copy the binary the
+    # service already uses (its ImagePath) into secrets\bin and point the service at the copy;
+    # update.sh uses that copy when it's there.
+    NSSM_PIN="$SECRETS/bin/nssm.exe"
+    nssm_now="$(MSYS_NO_PATHCONV=1 reg query "HKLM\\SYSTEM\\CurrentControlSet\\Services\\$SERVICE_NAME" /v ImagePath 2>/dev/null \
+        | tr -d '\r' | sed -n 's/^[[:space:]]*ImagePath[[:space:]]*REG_[A-Z_]*[[:space:]]*//p' | sed 's/^"//; s/"$//')"
+    [[ -n "$nssm_now" ]] || die "could not read the $SERVICE_NAME service's ImagePath (reg query failed)."
+    nssm_now="$(cygpath -u "$nssm_now")"
+    if [[ "${nssm_now,,}" != "${NSSM_PIN,,}" ]]; then
+        [[ -f "$nssm_now" ]] || die "the $SERVICE_NAME service runs $(win "$nssm_now"), which isn't there."
+        cp -f "$nssm_now" "$NSSM_PIN" || die "could not copy NSSM into $(win "$SECRETS/bin")."
+        lock_dir "$SECRETS"
+        MSYS_NO_PATHCONV=1 sc.exe config "$SERVICE_NAME" binPath= "$(win "$NSSM_PIN")" >/dev/null \
+            || die "could not point the $SERVICE_NAME service at $(win "$NSSM_PIN") (sc config failed)."
+        say "NSSM: the service now runs $(win "$NSSM_PIN") (was $(win "$nssm_now")); it takes effect at the next restart."
+    fi
+
     if [[ -f "$INSTALL_DIR/allowed_signers" ]] && grep -qE '^[^#[:space:]]' "$INSTALL_DIR/allowed_signers"; then
         cp -f "$INSTALL_DIR/allowed_signers" "$SECRETS/allowed_signers"
         say "Trusted release keys: $(grep -cE '^[^#[:space:]]' "$SECRETS/allowed_signers") in $(win "$SECRETS/allowed_signers")."
@@ -655,9 +681,6 @@ for kind in out err; do
     ls -1t "$INSTALL_DIR/logs/telemetry.\$kind-"*.log 2>/dev/null | tail -n +6 | while IFS= read -r f; do rm -f -- "\$f"; done
 done
 export TELEMETRY_DIR="$INSTALL_DIR"
-# SYSTEM's own PATH may not include NSSM (a per-user install, say); update.sh restarts the
-# service with it (Errata, OPS-75 L3a).
-export PATH="$(dirname "$(command -v nssm)"):\$PATH"
 exec bash "$SECRETS/bin/autoupdate.sh" >>"\$log" 2>&1
 WRAP
         lock_dir "$SECRETS"   # the new files inherit, but say so explicitly
