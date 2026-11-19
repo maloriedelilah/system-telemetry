@@ -109,17 +109,21 @@ finish() {
         return 0
     fi
     say "Refreshing deps…"
-    STEP="pip install -r requirements.txt"
+    # The hashed lock when the release has one (OPS-75): exact versions, exact bytes, no extra
+    # dependencies, so an unattended update installs only what was reviewed.
+    local req=(-r "$INSTALL_DIR/requirements.txt")
+    [[ -f "$INSTALL_DIR/requirements.lock" ]] && req=(--require-hashes --no-deps -r "$INSTALL_DIR/requirements.lock")
+    STEP="pip install ${req[*]}"
     if [[ "$OS" == linux ]]; then
         # As the venv's owner, never as root through a venv another user can write (Errata, OPS-19 L5).
         owner="$(stat -c %U "$INSTALL_DIR/venv")"
         if [[ "$owner" == root ]]; then
-            "$py" -m pip install --quiet --no-cache-dir -r "$INSTALL_DIR/requirements.txt"
+            "$py" -m pip install --quiet --no-cache-dir "${req[@]}"
         else
-            runuser -u "$owner" -- "$py" -m pip install --quiet --no-cache-dir -r "$INSTALL_DIR/requirements.txt"
+            runuser -u "$owner" -- "$py" -m pip install --quiet --no-cache-dir "${req[@]}"
         fi
     else
-        "$py" -m pip install --quiet --no-cache-dir -r "$INSTALL_DIR/requirements.txt"
+        "$py" -m pip install --quiet --no-cache-dir "${req[@]}"
     fi
     SO_FAR="checked out $tag; deps refreshed; the service isn't restarted yet"
     if [[ "$OS" == linux ]]; then
