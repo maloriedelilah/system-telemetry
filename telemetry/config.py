@@ -7,6 +7,7 @@ installed package so `python -m telemetry` behaves identically from a shell.
 """
 
 import os
+import re
 import socket
 import sys
 
@@ -129,6 +130,29 @@ SITES_CONTROL_URL = "https://www.google.com/generate_204"
 # Folder of status files that occasional jobs write (heartbeats.py); empty = off. Chonky's 04:00
 # backup pull writes C:\scripts\status\*.json.
 HEARTBEATS_DIR = os.environ.get("HEARTBEATS_DIR", "").strip()
+
+# The self-updater's own heartbeat (OPS-75): autoupdate.sh, outside the checkout and run as root or
+# SYSTEM, writes telemetry-update.json here after each run. Read on every box when the folder
+# exists; root's or Administrators' only to write.
+UPDATER_HEARTBEAT_DIR = (os.environ.get("TELEMETRY_UPDATER_HEARTBEAT_DIR", "").strip()
+                         or (r"C:\ProgramData\telemetry\secrets\heartbeat" if sys.platform == "win32"
+                             else "/var/lib/telemetry/heartbeat"))
+
+# The release this checkout runs: update.sh's finish writes the tag to VERSION (OPS-75). The
+# self-updater's health check looks for it in the run's output.
+INSTALL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def _version():
+    try:
+        with open(os.path.join(INSTALL_DIR, "VERSION"), encoding="ascii") as f:
+            v = f.read(32).strip()
+    except (OSError, UnicodeDecodeError):
+        return "unknown"
+    return v if re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", v) else "unknown"
+
+
+VERSION = _version()
 
 # Platform flag: the Linux host collector (psutil/lm-sensors) only runs here.
 IS_LINUX = sys.platform.startswith("linux")
