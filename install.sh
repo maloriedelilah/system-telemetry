@@ -10,7 +10,7 @@
 # Fleet mode (Linux, no questions; pane's telemetry-install.sh uses it, OPS-47):
 #
 #     sudo ./install.sh --profile host|gpu|vm --pane-url http://<pane>:8427 \
-#         [--models llamaserver=URL[,URL] | --models ollama=URL] [--run-user telemetry] [--token-stdin]
+#         [--models llamaserver=URL[,URL] | --models ollama=URL] [--run-user telemetry] [--token-stdin] [--sites]
 #
 #   host  CPU/RAM/disk (psutil + hwmon)       gpu  host + NVIDIA       vm  host, for VMs (no sensors)
 #   MQTT is off in every profile (fleet boxes report to Pane only). The profile always
@@ -19,6 +19,11 @@
 #                default: the account that ran sudo.
 #   --token-stdin  read this box's Pane token (from pane's add-box.sh) on stdin and save it
 #                  to secrets/pane_token, 0400, owned by the run user.
+#   --sites        also probe the public sites in sites.txt (TELEMETRY_SITES=1; pane only, OPS-59).
+#   --no-sites     turn them off. With neither, the box keeps what its .env already says, so a rerun
+#                  (or --reconfigure) never quietly stops pane probing the sites.
+#   The install dir must be root's in fleet mode, as update.sh requires: secrets/ is safe only
+#   inside a directory the run user can't rearrange.
 #
 # First run with no .env: prompts for MQTT, roles, and model source, writes
 # .env, builds the venv, and registers the service. Re-running with an existing
@@ -29,13 +34,17 @@
 #           The venv makes a run-as-user account unnecessary.
 # ---------------------------------------------------------------------------
 set -euo pipefail
+# Every pattern here ([!-~], [0-9], [a-z]) means ASCII. Under a locale such as en_US.UTF-8, bash's
+# =~ takes ranges from the collation order instead, and [!-~] then refused every real Pane token
+# (Nov 13, the first box after pane). Assigning LC_ALL makes bash switch locale right here.
+export LC_ALL=C
 
 SERVICE_NAME="system-telemetry"
 INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TTY_R="${TELEMETRY_TTY_R:-/dev/tty}"      # terminal for reading answers (overridable for tests)
 TTY_W="${TELEMETRY_TTY_W:-/dev/tty}"      # terminal for writing prompts
 RECONFIGURE=0
-PROFILE="" PANE_URL_ARG="" MODELS_ARG="" RUN_USER_ARG="" TOKEN_STDIN=0
+PROFILE="" PANE_URL_ARG="" MODELS_ARG="" RUN_USER_ARG="" TOKEN_STDIN=0 SITES=""
 ORIG_ARGS=("$@")
 
 say()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
@@ -55,8 +64,10 @@ while [[ $# -gt 0 ]]; do
         --models)      MODELS_ARG="${2:-}"; shift 2 || shift ;;
         --run-user)    RUN_USER_ARG="${2:-}"; shift 2 || shift ;;
         --token-stdin) TOKEN_STDIN=1; shift ;;
+        --sites)       SITES=1; shift ;;
+        --no-sites)    SITES=0; shift ;;
         *) report "unknown argument" "read the command line" \
-               "--reconfigure, or --profile host|gpu|vm --pane-url URL [--models ...] [--run-user NAME] [--token-stdin]" \
+               "--reconfigure, or --profile host|gpu|vm --pane-url URL [--models ...] [--run-user NAME] [--token-stdin] [--sites]" \
                "'$1'" "check the command (the header of install.sh lists the options). Nothing was changed."
            exit 2 ;;
     esac
@@ -218,6 +229,7 @@ LHM_GPUS=$LHM_GPUS
 LHM_URL=$LHM_URL
 LHM_GPU_INCLUDE=$LHM_INC
 TELEMETRY_HOST=$HOST_STATS
+TELEMETRY_SITES=$SITES
 
 MODEL_SOURCE=$MODEL_SOURCE
 MODEL_API_URL=$MODEL_URL
@@ -227,7 +239,7 @@ MODEL_FILTER=$MODEL_FILTER
 LOOP_INTERVAL=$LOOP
 DEBUG=0
 ENV
-    mv -f "$tmp" "$INSTALL_DIR/.env"
+    mv -f -T "$tmp" "$INSTALL_DIR/.env"
     say "Wrote $INSTALL_DIR/.env"
 }
 
@@ -277,6 +289,25 @@ if [[ -n "$PROFILE" ]]; then
             "'$RUN_USER_ARG' (uid 0)" "use --run-user telemetry (created if missing). Nothing was changed."
         exit 2
     fi
+    # The same check update.sh makes (Errata, OPS-47 Low): a run user that owned the install dir
+    # could swap secrets/ itself for a link between our check and our chown.
+    for p in "$INSTALL_DIR" "$INSTALL_DIR/.git"; do
+        if [[ -e "$p" && "$(stat -c %u "$p")" != 0 ]]; then
+            report "the install dir isn't root's" "stat -c %U $p" "owned by root (fleet mode keeps the token here)" \
+                "owned by $(stat -c %U "$p")" "if nobody changed it on purpose, find out who did; then: chown root:root $p, and run this again. Nothing was changed."
+            exit 2
+        fi
+    done
+elif [[ -n "$SITES" ]]; then
+    report "--sites/--no-sites are for fleet mode" "read the options" "--profile ... --sites" "--sites or --no-sites without --profile" \
+        "add --profile (the interactive install keeps whatever .env says). Nothing was changed."
+    exit 2
+fi
+# With neither --sites nor --no-sites, keep what .env says now (Errata, OPS-59 Blocker: a rerun or
+# --reconfigure dropped it, and pane stopped probing every site with nothing to say so).
+if [[ -z "$SITES" ]]; then
+    SITES=0
+    grep -qsx 'TELEMETRY_SITES=1' "$INSTALL_DIR/.env" && SITES=1
 fi
 
 # The token, read now (before anything changes) so a bad paste stops the run cleanly.
@@ -318,6 +349,7 @@ LHM_GPUS=0
 LHM_URL=http://localhost:8085/data.json
 LHM_GPU_INCLUDE=
 TELEMETRY_HOST=1
+TELEMETRY_SITES=$SITES
 
 MODEL_SOURCE=$MODEL_SOURCE_F
 MODEL_API_URL=$MODEL_URL_F
@@ -327,8 +359,9 @@ MODEL_FILTER=
 LOOP_INTERVAL=
 DEBUG=0
 ENV
-    mv -f "$tmp" "$INSTALL_DIR/.env"
+    mv -f -T "$tmp" "$INSTALL_DIR/.env"
     say "Wrote $INSTALL_DIR/.env (profile $PROFILE)"
+    if [[ "$SITES" == 1 ]]; then say "Site probes are on (TELEMETRY_SITES=1). --no-sites turns them off."; fi
 }
 
 # ---------------------------------------------------------------------------
@@ -353,7 +386,7 @@ fi
 # LINUX — venv + systemd
 # ===========================================================================
 if [[ "$OS" == linux ]]; then
-    RUN_USER="${RUN_USER_ARG:-${SUDO_USER:-$USER}}"
+    RUN_USER="${RUN_USER_ARG:-${SUDO_USER:-${USER:-$(id -un)}}}"
     if [[ -n "$RUN_USER_ARG" ]] && ! id -u "$RUN_USER" >/dev/null 2>&1; then
         say "Creating system user '$RUN_USER' for the service…"
         useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "$RUN_USER"
@@ -381,7 +414,10 @@ if [[ "$OS" == linux ]]; then
             printf '%s' "$TOKEN" > "$tmp"
             chown -h "$RUN_USER:$group" "$tmp"
             chmod 0400 "$tmp"
-            mv -f "$tmp" "$tok"
+            # A directory (or anything) planted at the name would swallow the token, so it goes
+            # first, and mv -T never moves into a directory (Errata, OPS-47 Low).
+            if [[ -L "$tok" || ( -e "$tok" && ! -f "$tok" ) ]]; then rm -rf -- "$tok"; fi
+            mv -f -T "$tmp" "$tok"
             say "Saved the Pane token to $tok (0400, $RUN_USER)."
         elif [[ -L "$tok" || ( -e "$tok" && ( ! -f "$tok" || "$(stat -c %h "$tok")" != 1 ) ) ]]; then
             rm -rf -- "$tok"
@@ -451,7 +487,8 @@ if [[ "$OS" == linux ]]; then
     systemctl enable --now "${SERVICE_NAME}.timer"
     say "Done. Timer active. Run now:  sudo systemctl start ${SERVICE_NAME}.service"
     say "Logs:  journalctl -u ${SERVICE_NAME}.service -f"
-    [[ -n "$TOKEN" ]] || say "Pane: put this box's token in $INSTALL_DIR/secrets/pane_token (0400, owned by $RUN_USER) — see README."
+    # Only when there is no token at all: a kept token needs nothing (pane's rerun, Nov 13).
+    [[ -n "$TOKEN" || -s "$INSTALL_DIR/secrets/pane_token" ]] || say "Pane: put this box's token in $INSTALL_DIR/secrets/pane_token (0400, owned by $RUN_USER) — see README."
     [[ "$INSTALL_DIR" == /opt/telemetry ]] || \
         say "      Install dir isn't /opt/telemetry: also set PANE_TOKEN_FILE=$INSTALL_DIR/secrets/pane_token in .env."
     exit 0
