@@ -1,0 +1,13 @@
+# Installed to /etc/systemd/system/telemetry-autoupdate.timer by install.sh (OPS-75).
+# About hourly, at a different minute on each box so they don't all fetch at once.
+[Unit]
+Description=Run the system-telemetry self-update about hourly
+
+[Timer]
+OnBootSec=20min
+OnUnitActiveSec=1h
+RandomizedDelaySec=20min
+Unit=telemetry-autoupdate.service
+
+[Install]
+WantedBy=timers.target

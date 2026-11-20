@@ -25,6 +25,14 @@
 #   The install dir must be root's in fleet mode, as update.sh requires: secrets/ is safe only
 #   inside a directory the run user can't rearrange.
 #
+# Either mode (OPS-75):
+#   --ring canary|main|off   how this box takes new releases on its own (TELEMETRY_UPDATE_RING):
+#                canary at once, main once promoted and 24 h old, off never. With no --ring the box
+#                keeps what its .env says (main when it says nothing).
+#   Every run also puts the trusted release keys (allowed_signers) and the self-updater
+#   (autoupdate.sh) outside the checkout, with an hourly timer (Linux) or SYSTEM task (Windows).
+#   A rerun keeps the run user the installed unit already has unless --run-user says otherwise.
+#
 # First run with no .env: prompts for MQTT, roles, and model source, writes
 # .env, builds the venv, and registers the service. Re-running with an existing
 # .env keeps your config and just (re)builds the venv + service.
@@ -44,7 +52,10 @@ INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TTY_R="${TELEMETRY_TTY_R:-/dev/tty}"      # terminal for reading answers (overridable for tests)
 TTY_W="${TELEMETRY_TTY_W:-/dev/tty}"      # terminal for writing prompts
 RECONFIGURE=0
-PROFILE="" PANE_URL_ARG="" MODELS_ARG="" RUN_USER_ARG="" TOKEN_STDIN=0 SITES=""
+PROFILE="" PANE_URL_ARG="" MODELS_ARG="" RUN_USER_ARG="" TOKEN_STDIN=0 SITES="" RING=""
+# Where the updater pieces go; overridable for the tests (same names update.sh and autoupdate.sh use).
+UNIT_DIR="${TELEMETRY_UNIT_DIR:-/etc/systemd/system}"
+SBIN_DIR="${TELEMETRY_SBIN:-/usr/local/sbin}"
 ORIG_ARGS=("$@")
 
 say()  { printf '\033[1;36m==>\033[0m %s\n' "$*"; }
@@ -66,8 +77,9 @@ while [[ $# -gt 0 ]]; do
         --token-stdin) TOKEN_STDIN=1; shift ;;
         --sites)       SITES=1; shift ;;
         --no-sites)    SITES=0; shift ;;
+        --ring)        RING="${2:-}"; shift 2 || shift ;;
         *) report "unknown argument" "read the command line" \
-               "--reconfigure, or --profile host|gpu|vm --pane-url URL [--models ...] [--run-user NAME] [--token-stdin] [--sites]" \
+               "--reconfigure, or --profile host|gpu|vm --pane-url URL [--models ...] [--run-user NAME] [--token-stdin] [--sites], and --ring canary|main|off" \
                "'$1'" "check the command (the header of install.sh lists the options). Nothing was changed."
            exit 2 ;;
     esac
@@ -309,6 +321,15 @@ if [[ -z "$SITES" ]]; then
     SITES=0
     grep -qsx 'TELEMETRY_SITES=1' "$INSTALL_DIR/.env" && SITES=1
 fi
+# The update ring (OPS-75): only these three words. With no --ring, what .env says now is kept,
+# so a fleet-mode rewrite never quietly moves a canary back to main.
+if [[ -n "$RING" && ! "$RING" =~ ^(canary|main|off)$ ]]; then
+    report "unknown --ring" "read --ring" "canary, main or off" "'${RING:0:40}'" "pick one of the three. Nothing was changed."
+    exit 2
+fi
+if [[ -z "$RING" ]]; then
+    RING="$(grep -sE '^TELEMETRY_UPDATE_RING=(canary|main|off)[[:space:]]*$' "$INSTALL_DIR/.env" | tail -n 1 | sed 's/^[^=]*=//; s/[[:space:]]*$//' || true)"
+fi
 
 # The token, read now (before anything changes) so a bad paste stops the run cleanly.
 TOKEN=""
@@ -382,11 +403,72 @@ else
     fi
 fi
 
+# The ring goes in .env as one line, replacing any earlier one; with none set, .env says nothing and
+# autoupdate.sh treats that as main.
+if [[ -n "$RING" ]]; then
+    (
+        umask 077
+        tmp="$(mktemp "$INSTALL_DIR/.env.XXXXXX")"
+        grep -v '^TELEMETRY_UPDATE_RING=' "$INSTALL_DIR/.env" > "$tmp" || true
+        printf 'TELEMETRY_UPDATE_RING=%s\n' "$RING" >> "$tmp"
+        mv -f "$tmp" "$INSTALL_DIR/.env"
+    )
+    say "Update ring: $RING (TELEMETRY_UPDATE_RING in .env)."
+fi
+
+# pip's input: the hashed lock when the checkout has one (OPS-75), requirements.txt otherwise.
+PIP_REQ=(-r "$INSTALL_DIR/requirements.txt")
+[[ -f "$INSTALL_DIR/requirements.lock" ]] && PIP_REQ=(--require-hashes --no-deps -r "$INSTALL_DIR/requirements.lock")
+
+# ---------------------------------------------------------------------------
+# The trusted release keys and the self-updater (OPS-75). They live outside the checkout, so a
+# release can't change what judges releases or rolls them back: only a person running install.sh
+# (or, for the keys, a release signed by a key the box already trusts) moves them.
+# ---------------------------------------------------------------------------
+place_updater_linux() {
+    local signers="${TELEMETRY_ALLOWED_SIGNERS:-/etc/telemetry/allowed_signers}"
+    local hb="${TELEMETRY_UPDATER_HEARTBEAT_DIR:-/var/lib/telemetry/heartbeat}"
+    if [[ -f "$INSTALL_DIR/allowed_signers" ]] && grep -qE '^[^#[:space:]]' "$INSTALL_DIR/allowed_signers"; then
+        mkdir -p "$(dirname "$signers")"
+        install -o root -g root -m 0644 "$INSTALL_DIR/allowed_signers" "$signers"
+        say "Trusted release keys: $(grep -cE '^[^#[:space:]]' "$signers") in $signers."
+    else
+        warn "No release keys in $INSTALL_DIR/allowed_signers: $signers left as it is."
+    fi
+    if [[ ! -f "$INSTALL_DIR/autoupdate.sh" ]]; then
+        warn "No autoupdate.sh in this release: no self-updater installed."
+        return 0
+    fi
+    install -o root -g root -m 0755 "$INSTALL_DIR/autoupdate.sh" "$SBIN_DIR/telemetry-autoupdate"
+    install -d -o root -g root -m 0755 "$hb"
+    sed -e "s#__INSTALL_DIR__#$INSTALL_DIR#g" "$INSTALL_DIR/service/autoupdate.service" > "$UNIT_DIR/telemetry-autoupdate.service"
+    cp "$INSTALL_DIR/service/autoupdate.timer" "$UNIT_DIR/telemetry-autoupdate.timer"
+    if [[ "${TELEMETRY_SKIP_SERVICE:-0}" != 1 ]]; then
+        systemctl daemon-reload
+        systemctl enable --now telemetry-autoupdate.timer
+    fi
+    say "Self-updater: $SBIN_DIR/telemetry-autoupdate, hourly (telemetry-autoupdate.timer); ring ${RING:-main}."
+}
+
 # ===========================================================================
 # LINUX — venv + systemd
 # ===========================================================================
 if [[ "$OS" == linux ]]; then
-    RUN_USER="${RUN_USER_ARG:-${SUDO_USER:-${USER:-$(id -un)}}}"
+    # A rerun keeps the run user the installed unit already has; only --run-user changes it
+    # (keystone, Nov 18: a bare rerun moved the service from telemetry to the sudo user).
+    UNIT_USER=""
+    if [[ -f "$UNIT_DIR/${SERVICE_NAME}.service" ]]; then
+        UNIT_USER="$(sed -n 's/^User=//p' "$UNIT_DIR/${SERVICE_NAME}.service" | tail -n 1)"
+        # Only a real, unprivileged account: root is what --run-user exists to avoid (OPS-47).
+        if ! [[ "$UNIT_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || ! id -u "$UNIT_USER" >/dev/null 2>&1 \
+           || [[ "$(id -u "$UNIT_USER")" == 0 ]]; then
+            UNIT_USER=""
+        fi
+    fi
+    RUN_USER="${RUN_USER_ARG:-${UNIT_USER:-${SUDO_USER:-${USER:-$(id -un)}}}}"
+    if [[ -z "$RUN_USER_ARG" && -n "$UNIT_USER" ]]; then
+        say "Run user: $UNIT_USER (kept from the installed unit; --run-user changes it)."
+    fi
     if [[ -n "$RUN_USER_ARG" ]] && ! id -u "$RUN_USER" >/dev/null 2>&1; then
         say "Creating system user '$RUN_USER' for the service…"
         useradd --system --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "$RUN_USER"
@@ -434,7 +516,8 @@ if [[ "$OS" == linux ]]; then
         # Tests: .env and the token only; no venv, no systemd.
         chown -h "$RUN_USER" "$INSTALL_DIR/.env" 2>/dev/null || true
         secure_token
-        say "TELEMETRY_SKIP_SERVICE=1: .env and token only."
+        place_updater_linux
+        say "TELEMETRY_SKIP_SERVICE=1: .env, token and updater files only."
         exit 0
     fi
 
@@ -468,7 +551,7 @@ if [[ "$OS" == linux ]]; then
     fi
     "${AS[@]}" python3 -m venv "$INSTALL_DIR/venv"
     "${AS[@]}" "$INSTALL_DIR/venv/bin/pip" install --quiet --upgrade pip
-    "${AS[@]}" "$INSTALL_DIR/venv/bin/pip" install --quiet -r "$INSTALL_DIR/requirements.txt"
+    "${AS[@]}" "$INSTALL_DIR/venv/bin/pip" install --quiet "${PIP_REQ[@]}"
     chown -R "$RUN_USER" "$INSTALL_DIR/venv" 2>/dev/null || true
     # .env is written root-owned (umask 077 under the sudo re-exec), but the
     # service runs as $RUN_USER. Hand it over so config.py can read it; mode
@@ -480,11 +563,12 @@ if [[ "$OS" == linux ]]; then
     say "Installing systemd unit + timer (run user: $RUN_USER)…"
     sed -e "s#__INSTALL_DIR__#$INSTALL_DIR#g" -e "s#__RUN_USER__#$RUN_USER#g" \
         "$INSTALL_DIR/service/telemetry.service" \
-        > "/etc/systemd/system/${SERVICE_NAME}.service"
+        > "$UNIT_DIR/${SERVICE_NAME}.service"
     cp "$INSTALL_DIR/service/telemetry.timer" \
-        "/etc/systemd/system/${SERVICE_NAME}.timer"
+        "$UNIT_DIR/${SERVICE_NAME}.timer"
     systemctl daemon-reload
     systemctl enable --now "${SERVICE_NAME}.timer"
+    place_updater_linux
     say "Done. Timer active. Run now:  sudo systemctl start ${SERVICE_NAME}.service"
     say "Logs:  journalctl -u ${SERVICE_NAME}.service -f"
     # Only when there is no token at all: a kept token needs nothing (pane's rerun, Nov 13).
@@ -504,7 +588,7 @@ if [[ "$OS" == windows ]]; then
     "$PY" -m venv "$INSTALL_DIR/venv"
     VENV_PY="$INSTALL_DIR/venv/Scripts/python.exe"
     "$VENV_PY" -m pip install --quiet --upgrade pip
-    "$VENV_PY" -m pip install --quiet -r "$INSTALL_DIR/requirements.txt"
+    "$VENV_PY" -m pip install --quiet "${PIP_REQ[@]}"
     mkdir -p "$INSTALL_DIR/logs"
 
     command -v nssm >/dev/null || die "nssm not found on PATH. Install NSSM, then re-run."
@@ -523,9 +607,89 @@ if [[ "$OS" == windows ]]; then
     nssm set "$SERVICE_NAME" AppStdout "$WOUT"
     nssm set "$SERVICE_NAME" AppStderr "$WERR"
     nssm set "$SERVICE_NAME" Start SERVICE_AUTO_START
+    # Rotate the logs at 10 MB, also while running (OPS-76: Eighty-Eight's had reached 63 MB).
+    # NSSM never deletes the old ones; the self-updater's hourly task keeps the newest five.
+    nssm set "$SERVICE_NAME" AppRotateFiles 1
+    nssm set "$SERVICE_NAME" AppRotateOnline 1
+    nssm set "$SERVICE_NAME" AppRotateSeconds 0
+    nssm set "$SERVICE_NAME" AppRotateBytes 10485760
 
     say "Starting service (runs as LocalSystem — the venv makes that sufficient)…"
     nssm start "$SERVICE_NAME" 2>/dev/null || nssm restart "$SERVICE_NAME"
+
+    # SYSTEM runs this checkout (the service, and the hourly self-updater), so nobody but SYSTEM
+    # and Administrators may change a byte of it: a folder made under C:\ inherits "Authenticated
+    # Users: Modify", which would let any signed-in user edit update.sh or .git/config and run as
+    # SYSTEM on the next hourly run (Errata, OPS-75 B1). Users keep read access. The owner moves to
+    # Administrators too, since an owner can always rewrite the ACL. MSYS would turn icacls' and
+    # schtasks' /switches into paths, hence MSYS_NO_PATHCONV.
+    # No /C: icacls stops at the first file it can't change and exits non-zero, and the summary is
+    # checked as well, so a partial lock is never taken for a whole one (Errata, OPS-75 L6).
+    icacls_all() {   # icacls arguments...
+        local o
+        o="$(MSYS_NO_PATHCONV=1 icacls "$@" 2>&1)" && ! grep -qE 'Failed processing [1-9]' <<<"$o"
+    }
+    lock_dir() {   # dir, extra grants...
+        local d="$1"; shift
+        icacls_all "$(win "$d")" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "$@" /T \
+            && icacls_all "$(win "$d")" /setowner "*S-1-5-32-544" /T \
+            || die "could not lock $(win "$d") to SYSTEM and Administrators (icacls failed); nothing past the service was set up."
+    }
+    lock_dir "$INSTALL_DIR" "*S-1-5-32-545:(OI)(CI)RX"
+    say "Locked $(win "$INSTALL_DIR"): SYSTEM and Administrators change it, Users read it."
+
+    # The trusted release keys and the self-updater (OPS-75), in secrets\ (SYSTEM and
+    # Administrators only: ProgramData's default ACL lets any user create files beside it, and
+    # whoever made the folder first would still own it).
+    SECRETS=/c/ProgramData/telemetry/secrets
+    mkdir -p "$SECRETS/bin" "$SECRETS/state" "$SECRETS/heartbeat"
+    lock_dir "$SECRETS"
+
+    # NSSM from a folder only admins can write (Errata, OPS-75 r2 B1). A per-user NSSM (scoop's,
+    # say) sits in a folder Malorie's own account can write, so the service, and the SYSTEM task
+    # that restarts it, would run whatever an unelevated program put there. Copy the binary the
+    # service already uses (its ImagePath) into secrets\bin and point the service at the copy;
+    # update.sh uses that copy when it's there.
+    NSSM_PIN="$SECRETS/bin/nssm.exe"
+    nssm_now="$(MSYS_NO_PATHCONV=1 reg query "HKLM\\SYSTEM\\CurrentControlSet\\Services\\$SERVICE_NAME" /v ImagePath 2>/dev/null \
+        | tr -d '\r' | sed -n 's/^[[:space:]]*ImagePath[[:space:]]*REG_[A-Z_]*[[:space:]]*//p' | sed 's/^"//; s/"$//')"
+    [[ -n "$nssm_now" ]] || die "could not read the $SERVICE_NAME service's ImagePath (reg query failed)."
+    nssm_now="$(cygpath -u "$nssm_now")"
+    if [[ "${nssm_now,,}" != "${NSSM_PIN,,}" ]]; then
+        [[ -f "$nssm_now" ]] || die "the $SERVICE_NAME service runs $(win "$nssm_now"), which isn't there."
+        cp -f "$nssm_now" "$NSSM_PIN" || die "could not copy NSSM into $(win "$SECRETS/bin")."
+        lock_dir "$SECRETS"
+        MSYS_NO_PATHCONV=1 sc.exe config "$SERVICE_NAME" binPath= "$(win "$NSSM_PIN")" >/dev/null \
+            || die "could not point the $SERVICE_NAME service at $(win "$NSSM_PIN") (sc config failed)."
+        say "NSSM: the service now runs $(win "$NSSM_PIN") (was $(win "$nssm_now")); it takes effect at the next restart."
+    fi
+
+    if [[ -f "$INSTALL_DIR/allowed_signers" ]] && grep -qE '^[^#[:space:]]' "$INSTALL_DIR/allowed_signers"; then
+        cp -f "$INSTALL_DIR/allowed_signers" "$SECRETS/allowed_signers"
+        say "Trusted release keys: $(grep -cE '^[^#[:space:]]' "$SECRETS/allowed_signers") in $(win "$SECRETS/allowed_signers")."
+    fi
+    if [[ -f "$INSTALL_DIR/autoupdate.sh" ]]; then
+        cp -f "$INSTALL_DIR/autoupdate.sh" "$SECRETS/bin/autoupdate.sh"
+        # The task runs a short wrapper (schtasks /TR is capped near 260 characters): it names the
+        # install dir, keeps the newest five rotated NSSM logs, and appends to a log of its own.
+        cat > "$SECRETS/bin/run-autoupdate.sh" <<WRAP
+#!/bin/bash
+# Written by install.sh (OPS-75): the SYSTEM task "system-telemetry-autoupdate" runs this hourly.
+log=$SECRETS/state/autoupdate.log
+[ "\$(stat -c %s "\$log" 2>/dev/null || echo 0)" -gt 1048576 ] && mv -f "\$log" "\$log.1"
+for kind in out err; do
+    ls -1t "$INSTALL_DIR/logs/telemetry.\$kind-"*.log 2>/dev/null | tail -n +6 | while IFS= read -r f; do rm -f -- "\$f"; done
+done
+export TELEMETRY_DIR="$INSTALL_DIR"
+exec bash "$SECRETS/bin/autoupdate.sh" >>"\$log" 2>&1
+WRAP
+        lock_dir "$SECRETS"   # the new files inherit, but say so explicitly
+        BASH_W="$(win "$(command -v bash)")"
+        MSYS_NO_PATHCONV=1 schtasks /Create /F /TN "system-telemetry-autoupdate" /RU SYSTEM /RL HIGHEST /SC HOURLY \
+            /TR "\"$BASH_W\" -l $SECRETS/bin/run-autoupdate.sh" >/dev/null \
+            || die "could not create the scheduled task system-telemetry-autoupdate (schtasks failed)."
+        say "Self-updater: $(win "$SECRETS/bin/autoupdate.sh"), hourly as SYSTEM; ring ${RING:-main}."
+    fi
 
     say "Done."
     cat <<EOF

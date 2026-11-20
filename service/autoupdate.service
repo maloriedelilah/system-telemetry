@@ -1,0 +1,14 @@
+# Installed to /etc/systemd/system/telemetry-autoupdate.service by install.sh (OPS-75).
+# __INSTALL_DIR__ is replaced with the real path. The runner itself lives outside the checkout
+# (/usr/local/sbin/telemetry-autoupdate), so a broken release can't break its own rollback.
+[Unit]
+Description=system-telemetry self-update (rings, signed releases, rollback)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=TELEMETRY_DIR=__INSTALL_DIR__
+ExecStart=/usr/local/sbin/telemetry-autoupdate
+# A baseline run, update.sh, up to two health runs and maybe a rollback: generous, but bounded.
+TimeoutStartSec=30min

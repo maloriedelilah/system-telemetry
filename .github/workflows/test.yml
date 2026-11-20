@@ -22,8 +22,13 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
-      - name: Install runtime dependencies
-        run: pip install -r requirements.txt
+      - name: Install runtime dependencies (the hashed lock, as boxes do)
+        run: pip install --require-hashes --no-deps -r requirements.lock
+      - name: The lock pins every requirement in requirements.txt
+        run: |
+          for name in $(grep -Eo '^[A-Za-z0-9_.-]+' requirements.txt); do
+            grep -qiE "^${name}==" requirements.lock || { echo "::error::$name is in requirements.txt but not pinned in requirements.lock"; exit 1; }
+          done
       - name: Every module compiles and imports
         run: |
           python -m compileall -q telemetry tests
