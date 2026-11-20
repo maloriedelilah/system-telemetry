@@ -135,7 +135,13 @@ finish() {
             runuser -u "$owner" -- "$py" -m pip install --quiet --no-cache-dir "${req[@]}"
         fi
     else
-        "$py" -m pip install --quiet --no-cache-dir "${req[@]}"
+        # Windows won't replace a .pyd the running service has loaded, so the service stops for
+        # pip. If pip fails, it starts again on the old deps before the failure is reported.
+        "$NSSM" stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+        if ! "$py" -m pip install --quiet --no-cache-dir "${req[@]}"; then
+            "$NSSM" start "$SERVICE_NAME" >/dev/null 2>&1 || true
+            false
+        fi
     fi
     SO_FAR="checked out $tag; deps refreshed; the service isn't restarted yet"
     if [[ "$OS" == linux ]]; then
@@ -146,15 +152,16 @@ finish() {
         printf '%s\n' "$tag" >"$FINISHED"
         say "Done: telemetry $tag. Check: journalctl -u ${SERVICE_NAME}.service -n 20 --no-pager"
     else
-        STEP="nssm restart $SERVICE_NAME"
-        "$NSSM" restart "$SERVICE_NAME"
+        STEP="nssm start $SERVICE_NAME"
+        "$NSSM" start "$SERVICE_NAME"
         # The self-updater's health check runs its own cycle, so a service still on the old code
         # would go unnoticed without this (Errata, OPS-75 L3a). START_PENDING is normal for a
         # moment, so give it 20 s.
         STEP="nssm status $SERVICE_NAME (waiting for SERVICE_RUNNING)"
         local st=""
         for _ in $(seq 1 20); do
-            st="$("$NSSM" status "$SERVICE_NAME" 2>/dev/null | tr -d '\r')"
+            # NSSM writes UTF-16 to a pipe: drop the NULs as well as the CRs.
+            st="$("$NSSM" status "$SERVICE_NAME" 2>/dev/null | tr -d '\r\0')"
             [[ "$st" == SERVICE_RUNNING ]] && break
             sleep 1
         done
