@@ -212,6 +212,7 @@ install.sh          interactive installer (prompts -> .env, venv, service)
 update.sh           move to the newest signed release tag (deploy key) + deps + restart
 release.sh          maintainer: sign and push the tag vX.Y.Z on main, publish the release
 allowed_signers     the keys whose release tags boxes install (OPS-75)
+requirements.lock   exact pins + sha256 of every file; what finish installs (tools/lock.py writes it)
 autoupdate.sh       the unattended updater: rings, PROMOTED, health check, rollback (OPS-75)
 sites.txt           the public sites pane probes (TELEMETRY_SITES=1)
 .env.example        config schema reference (the installer writes the real .env)
