@@ -63,6 +63,17 @@ jobs:
         run: |
           shellcheck --version | sed -n 2p
           shellcheck -S warning *.sh
+      - name: Windows wrappers (update.cmd, install.cmd)
+        run: |
+          # One file under two names, CRLF on checkout, and nothing after bash starts but the same line
+          # (update.sh can rewrite update.cmd while cmd is still reading it).
+          cmp update.cmd install.cmd
+          for f in update.cmd install.cmd; do
+            test "$(git check-attr eol -- "$f" | awk '{print $NF}')" = crlf || { echo "::error::$f isn't eol=crlf in .gitattributes"; exit 1; }
+            n="$(grep -n '"%GITBASH%" -l' "$f" | cut -d: -f1)"
+            grep -q '"%GITBASH%" -l "./%~n0.sh" %\* & exit /b' "$f" || { echo "::error::$f: the bash line must end with '& exit /b'"; exit 1; }
+            test "$(sed -n "$((n + 1))p" "$f" | tr -d '\r')" = ":elevate" || { echo "::error::$f: only a label may follow the bash line"; exit 1; }
+          done
 
   test:
     runs-on: ubuntu-24.04
