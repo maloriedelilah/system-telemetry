@@ -582,18 +582,31 @@ fi
 # WINDOWS — venv + NSSM
 # ===========================================================================
 if [[ "$OS" == windows ]]; then
-    PY="$(command -v python || command -v py || true)"
-    [[ -n "$PY" ]] || die "python not found on PATH (need a system Python to build the venv)."
-    say "Creating venv…"
-    "$PY" -m venv "$INSTALL_DIR/venv"
+    command -v nssm >/dev/null || die "nssm not found on PATH. Install NSSM, then re-run."
+    win() { command -v cygpath >/dev/null && cygpath -w "$1" || echo "$1"; }
+
+    # The service runs as SYSTEM, and a venv's python.exe runs the base Python it was made from
+    # (pyvenv.cfg's home). So the base must be one only admins can change: an all-users install
+    # under Program Files, never PATH's, which can be a per-user install in the profile, writable
+    # by an unelevated program (found on Eighty-Eight, Nov 20). The newest one wins.
+    PY="$(printf '%s\n' "/c/Program Files/Python3"*/python.exe | sort -V | while IFS= read -r c; do [[ -x "$c" ]] && printf '%s\n' "$c"; done | tail -n 1)"
+    [[ -n "$PY" ]] || die "no Python installed for all users (C:\\Program Files\\Python3*). The service runs as SYSTEM, so it can't use a per-user Python. Install one: winget install -e --id Python.Python.3.14 --scope machine (or python.org's installer with \"Install for all users\"), then re-run."
     VENV_PY="$INSTALL_DIR/venv/Scripts/python.exe"
+    venv_home="$(sed -n 's/^home *= *//p' "$INSTALL_DIR/venv/pyvenv.cfg" 2>/dev/null | tr -d '\r')"
+    want_home="$(win "$(dirname "$PY")")"
+    # Windows won't replace a python.exe or .pyd the running service has open, so the service
+    # stops for the venv and pip; it starts again below.
+    nssm stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+    if [[ ! -x "$VENV_PY" || "${venv_home,,}" != "${want_home,,}" ]]; then
+        [[ -z "$venv_home" ]] || say "The venv was made from $venv_home; rebuilding it from $want_home."
+        rm -rf "$INSTALL_DIR/venv"
+        say "Creating venv from $(win "$PY")…"
+        "$PY" -m venv "$INSTALL_DIR/venv" || die "could not create the venv with $(win "$PY")."
+    fi
     "$VENV_PY" -m pip install --quiet --upgrade pip
-    "$VENV_PY" -m pip install --quiet "${PIP_REQ[@]}"
+    "$VENV_PY" -m pip install --quiet "${PIP_REQ[@]}" || die "pip install failed (the service is stopped; fix the cause and re-run)."
     mkdir -p "$INSTALL_DIR/logs"
 
-    command -v nssm >/dev/null || die "nssm not found on PATH. Install NSSM, then re-run."
-
-    win() { command -v cygpath >/dev/null && cygpath -w "$1" || echo "$1"; }
     WDIR="$(win "$INSTALL_DIR")"
     WVENV_PY="$(win "$VENV_PY")"
     WOUT="$(win "$INSTALL_DIR/logs/telemetry.out.log")"
@@ -625,15 +638,28 @@ if [[ "$OS" == windows ]]; then
     # schtasks' /switches into paths, hence MSYS_NO_PATHCONV.
     # No /C: icacls stops at the first file it can't change and exits non-zero, and the summary is
     # checked as well, so a partial lock is never taken for a whole one (Errata, OPS-75 L6).
-    icacls_all() {   # icacls arguments...
-        local o
-        o="$(MSYS_NO_PATHCONV=1 icacls "$@" 2>&1)" && ! grep -qE 'Failed processing [1-9]' <<<"$o"
+    ICACLS_OUT=""
+    icacls_all() {   # icacls arguments...; keeps icacls' own words for the error below
+        ICACLS_OUT="$(MSYS_NO_PATHCONV=1 icacls "$@" 2>&1 | tr -d '\r')" && ! grep -qE 'Failed processing [1-9]' <<<"$ICACLS_OUT"
     }
     lock_dir() {   # dir, extra grants...
         local d="$1"; shift
-        icacls_all "$(win "$d")" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "$@" /T \
-            && icacls_all "$(win "$d")" /setowner "*S-1-5-32-544" /T \
-            || die "could not lock $(win "$d") to SYSTEM and Administrators (icacls failed); nothing past the service was set up."
+        # 1. Administrators take ownership. A file owned by the user who cloned it would otherwise
+        #    refuse the admin's permission change (Eighty-Eight, Nov 20: 1,138 of 1,315 files).
+        #    takeown works whatever the DACL says, and an owner can always set the DACL.
+        MSYS_NO_PATHCONV=1 takeown /F "$(win "$d")" /A /R /D Y >/dev/null 2>&1 \
+            || die "could not make Administrators the owner of $(win "$d") (takeown failed)."
+        # 2. The folder itself: no inheritance from above, only these grants, inherited downwards.
+        #    Not /T: with /T, icacls strips the inherited ACEs from every file below and puts the
+        #    grants on the folder alone, leaving the files with an empty DACL that even SYSTEM
+        #    can't read (also Eighty-Eight, Nov 20).
+        icacls_all "$(win "$d")" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "$@" \
+            || die "could not lock $(win "$d") to SYSTEM and Administrators; icacls said: $(grep -vE '^(processed file|Successfully processed)' <<<"$ICACLS_OUT" | head -n 3 | tr '\n' ' ')"
+        # 3. Everything below goes back to inheriting from the folder, dropping any ACE of its own.
+        if [[ -n "$(ls -A "$d")" ]]; then
+            icacls_all "$(win "$d")\\*" /reset /T \
+                || die "could not reset the permissions under $(win "$d") to inherit; icacls said: $(grep -vE '^(processed file|Successfully processed)' <<<"$ICACLS_OUT" | head -n 3 | tr '\n' ' ')"
+        fi
     }
     lock_dir "$INSTALL_DIR" "*S-1-5-32-545:(OI)(CI)RX"
     say "Locked $(win "$INSTALL_DIR"): SYSTEM and Administrators change it, Users read it."
