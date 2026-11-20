@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # autoupdate.sh — the unattended updater (OPS-75).
 #
-# install.sh will copy this OUTSIDE the checkout (/usr/local/sbin/telemetry-autoupdate, or
-# C:\ProgramData\telemetry\bin\autoupdate.sh) and a timer will run it about hourly as root (or
-# SYSTEM): that's OPS-75 part B, which ships in the same release as this file. Until then nothing
-# runs it.
+# install.sh copies this OUTSIDE the checkout (/usr/local/sbin/telemetry-autoupdate, or
+# C:\ProgramData\telemetry\secrets\bin\autoupdate.sh) and a timer (telemetry-autoupdate.timer) or
+# SYSTEM scheduled task (system-telemetry-autoupdate) runs it about hourly.
 # Living outside the checkout means a broken release can't break the thing that rolls it back.
 #
 # Each run:
@@ -197,18 +196,25 @@ if ! base="$(health "$base_want")"; then
 fi
 
 log "updating $current -> $candidate (ring $ring, baseline $base lines)"
+upd_failed=""
 if ! bash "$INSTALL_DIR/update.sh" --auto "$candidate" >"$STATE_DIR/last-update.log" 2>&1; then
+    first_err="$(sed 's/\x1b\[[0-9;]*m//g' "$STATE_DIR/last-update.log" | grep -m1 '^!!!' | cut -c1-200)"
     now_at="$(g describe --tags --exact-match HEAD 2>/dev/null || true)"
     if [[ "$now_at" == "$current" ]]; then
-        finish_run failed false "update.sh refused or failed before changing anything: $(sed 's/\x1b\[[0-9;]*m//g' "$STATE_DIR/last-update.log" | grep -m1 '^!!!' | cut -c1-200) (log: $STATE_DIR/last-update.log)"
+        finish_run failed false "update.sh refused or failed before changing anything: $first_err (log: $STATE_DIR/last-update.log)"
     fi
+    # It failed after the checkout moved (pip, or the service didn't come back). A health run of
+    # our own could still pass on the new code while the service is down or on the old code, so
+    # this is unhealthy as it stands: roll back (Errata, OPS-75 L5).
+    upd_failed="update.sh failed after checking out $candidate: ${first_err:-no reason given}"
 fi
 
 # Healthy: the run succeeds, names $candidate, and pushes no fewer lines than the baseline. One
 # retry a minute later before rolling back: a Pane blip between the two checks shouldn't cost a
 # good release (Errata L3). The baseline already showed this box reaches Pane.
-reason=""
+reason="$upd_failed"
 for attempt in 1 2; do
+    [[ -z "$upd_failed" ]] || break
     if after="$(health "$candidate")"; then
         if (( after >= base )); then
             finish_run updated true "$current -> $candidate ($after lines, baseline $base)"

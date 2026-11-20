@@ -197,6 +197,18 @@ run || fail "a blip cost a good release" "$(tail -n 6 "$out")"
 check "it says it checks again" has 'checking again in 0s'
 check "and keeps the release" has 'updated: .* -> v1.8.0'
 
+echo "== autoupdate: update.sh failing after the checkout moved is rolled back, not trusted (Errata L5)"
+cp "$origin/update.sh" "$work/update.sh.real"
+sed -i 's|^if \[\[ "\${1:-}" == "--finish" \]\]; then$|[ "${1:-}" = --finish ] \&\& { echo "!!! the service did not come back (test)" >\&2; exit 1; }\n\&|' "$origin/update.sh"
+grep -q 'the service did not come back' "$origin/update.sh" || fail "the test couldn't break finish" "update.sh's --finish dispatch line moved"
+release 1.8.5
+cp "$work/update.sh.real" "$origin/update.sh"
+run && fail "a release whose finish failed was kept" "" || CHECKS=$((CHECKS + 1))
+check "it names update.sh's failure" has 'v1.8.5 was unhealthy (update.sh failed after checking out v1.8.5: !!! the service did not come back (test))'
+check "it skipped the health runs" bash -c '! grep -q "checking again in" "$1"' _ "$out"
+check "back at v1.8.0" test "$(at)" = v1.8.0
+check "v1.8.5 is on the bad list" grep -qx v1.8.5 "$work/state/bad"
+
 echo "== autoupdate: one run at a time"
 mkdir "$work/state/autoupdate.lock"
 run || fail "a locked run failed" "$(tail -n 5 "$out")"

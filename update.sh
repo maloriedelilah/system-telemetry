@@ -83,6 +83,10 @@ case "$(uname -s)" in
                           DEFAULT_STATE=/c/ProgramData/telemetry/secrets/state ;;
     *) report "unsupported OS" "uname -s" "Linux or Git Bash on Windows" "$(uname -s)" "run it on a supported box."; exit 2 ;;
 esac
+# install.sh copies NSSM into secrets\bin (admin-only) and points the service at it, so the SYSTEM
+# task never looks NSSM up on a PATH (Errata, OPS-75 r2 B1). Before that install, PATH's NSSM.
+NSSM=nssm
+[[ "$OS" == windows && -x /c/ProgramData/telemetry/secrets/bin/nssm.exe ]] && NSSM=/c/ProgramData/telemetry/secrets/bin/nssm.exe
 KEY="${TELEMETRY_DEPLOY_KEY:-$DEFAULT_KEY}"
 SIGNERS="${TELEMETRY_ALLOWED_SIGNERS:-$DEFAULT_SIGNERS}"
 STATE_DIR="${TELEMETRY_STATE_DIR:-$DEFAULT_STATE}"
@@ -92,7 +96,9 @@ verkey() { printf '%s\n' "$1" | awk '{ split(substr($0, 2), p, "."); printf "%01
 # Repository hooks, fsmonitor and ext:: never run in an update (it runs as root / admin). On Linux the
 # install dir must be root's (checked below), so git's own ownership check stays on; Git for Windows
 # can't compare an Administrators-owned folder with an admin user, so there it's marked safe.
-GITC=(-c core.hooksPath=/dev/null -c core.fsmonitor=false -c protocol.ext.allow=never)
+# safe.directory: SYSTEM (the Windows self-updater) runs git in a checkout Administrators own;
+# Linux already refuses a checkout root doesn't own (Errata, OPS-75 L3b).
+GITC=(-c core.hooksPath=/dev/null -c core.fsmonitor=false -c protocol.ext.allow=never -c safe.directory="$INSTALL_DIR")
 [[ "$OS" == windows ]] && GITC+=(-c "safe.directory=$INSTALL_DIR")
 gx() { git "${GITC[@]}" "$@"; }
 g() { git "${GITC[@]}" -C "$INSTALL_DIR" "$@"; }
@@ -141,7 +147,18 @@ finish() {
         say "Done: telemetry $tag. Check: journalctl -u ${SERVICE_NAME}.service -n 20 --no-pager"
     else
         STEP="nssm restart $SERVICE_NAME"
-        nssm restart "$SERVICE_NAME"
+        "$NSSM" restart "$SERVICE_NAME"
+        # The self-updater's health check runs its own cycle, so a service still on the old code
+        # would go unnoticed without this (Errata, OPS-75 L3a). START_PENDING is normal for a
+        # moment, so give it 20 s.
+        STEP="nssm status $SERVICE_NAME (waiting for SERVICE_RUNNING)"
+        local st=""
+        for _ in $(seq 1 20); do
+            st="$("$NSSM" status "$SERVICE_NAME" 2>/dev/null | tr -d '\r')"
+            [[ "$st" == SERVICE_RUNNING ]] && break
+            sleep 1
+        done
+        [[ "$st" == SERVICE_RUNNING ]]
         printf '%s\n' "$tag" >"$FINISHED"
         say "Done: telemetry $tag. Logs: $INSTALL_DIR/logs/telemetry.err.log"
     fi
@@ -204,13 +221,29 @@ if [[ -e "$SIGNERS" ]]; then
         exit 2
     fi
     if [[ "$OS" == windows ]]; then
-        acl="$(icacls "$(cygpath -w "$(dirname "$SIGNERS")")" 2>&1 || true)"
-        if grep -Eqi '\\Users:|Everyone:|Authenticated Users:' <<<"$acl"; then
-            report "the trusted signers folder isn't locked down" "icacls $(dirname "$SIGNERS")" "SYSTEM and Administrators only" \
-                "$(grep -Ei '\\Users:|Everyone:|Authenticated Users:' <<<"$acl" | tr -s ' ' | tr '\n' ';')" \
-                "lock it as the README's First install does (icacls ... /inheritance:r /grant:r SYSTEM and Administrators), then run ./update.sh again."
-            exit 2
-        fi
+        # The folder and the file itself (an ACE added on the file wouldn't show on the folder), and
+        # an icacls that fails is a refusal, not a pass (Errata, OPS-77 Lows).
+        # An allowlist, not a denylist (Errata, OPS-75 L2): every ACE must be SYSTEM, Administrators,
+        # TrustedInstaller or CREATOR OWNER, on the folder and on the file itself, and the owner
+        # Administrators or SYSTEM. An icacls that fails is a refusal, not a pass (OPS-77).
+        for target in "$(dirname "$SIGNERS")" "$SIGNERS"; do
+            wt="$(cygpath -w "$target")"
+            if ! acl="$(MSYS_NO_PATHCONV=1 icacls "$wt" 2>&1)"; then
+                report "could not read the trusted signers' permissions" "icacls $wt" "its ACL" "$(tr '\n' ' ' <<<"$acl" | cut -c1-200)" \
+                    "run this from an elevated Git Bash; if it still fails, tell Hopper. Nothing was changed."
+                exit 2
+            fi
+            others="$(tr -d '\r' <<<"$acl" | grep ':(' | sed "s|^$(printf '%s' "$wt" | sed 's/[][\\.*^$|]/\\&/g')||; s|^[[:space:]]*||; s|:(.*||" \
+                | grep -viE '^(NT AUTHORITY\\SYSTEM|BUILTIN\\Administrators|NT SERVICE\\TrustedInstaller|CREATOR OWNER)$' || true)"
+            owner="$(powershell.exe -NoProfile -Command "(Get-Acl -LiteralPath '$wt').Owner" 2>/dev/null | tr -d '\r' || true)"
+            if [[ -n "$others" || ! "$owner" =~ ^(BUILTIN\\Administrators|NT\ AUTHORITY\\SYSTEM)$ ]]; then
+                report "the trusted signers aren't locked down" "icacls and Get-Acl on $wt" \
+                    "only SYSTEM, Administrators, TrustedInstaller or CREATOR OWNER, owned by Administrators or SYSTEM" \
+                    "owner ${owner:-unknown}; others: $(tr '\n' ';' <<<"${others:-none}")" \
+                    "rerun ./install.sh from an elevated Git Bash (it locks secrets\\ again), then run ./update.sh again."
+                exit 2
+            fi
+        done
     fi
 elif [[ -e "$VERIFIED_MARK" ]]; then
     report "the trusted signers file is gone" "looked for $SIGNERS" "the allowed-signers file (this box has installed verified releases since $(cat "$VERIFIED_MARK" 2>/dev/null))" \

@@ -160,9 +160,11 @@ later. It's changed by PR like any code, and reaches a box's trusted copy only t
 
 ### Unattended updates (OPS-75)
 
-`autoupdate.sh` is the box's self-updater. install.sh will copy it outside the checkout and a timer
-will run it about hourly as root (or SYSTEM); that wiring is OPS-75 part B, released together with
-this file, so until then nothing runs it. Living outside the checkout means a broken release can't
+`autoupdate.sh` is the box's self-updater. install.sh copies it outside the checkout
+(`/usr/local/sbin/telemetry-autoupdate`, or `C:\ProgramData\telemetry\secrets\bin\`) with the
+trusted `allowed_signers`, and a timer (`telemetry-autoupdate.timer`) or a SYSTEM scheduled task
+(`system-telemetry-autoupdate`) runs it about hourly. Set a box's ring with `--ring` on install.sh
+(either mode); a rerun without it keeps the ring `.env` already has. Living outside the checkout means a broken release can't
 break the thing that rolls it back. Each run:
 
 1. reads the ring from `.env`: `TELEMETRY_UPDATE_RING=canary|main|off` (default `main`);
@@ -181,6 +183,18 @@ break the thing that rolls it back. Each run:
    failure or rollback, and late when the updater stops running.
 
 Promoting a release past the canaries is a one-line PR adding its tag to `PROMOTED`.
+
+**Turning it on, once per box** (the release that adds the updater, then the installer, by hand):
+
+```bash
+sudo ./update.sh && sudo ./install.sh --ring canary   # slimridge (Linux canary)
+sudo ./update.sh && sudo ./install.sh                 # every other Linux box (main ring)
+./update.sh && ./install.sh --ring canary             # Eighty-Eight, from an elevated Git Bash
+```
+
+On Windows install.sh also turns on NSSM log rotation (10 MB), and the hourly task keeps the five
+newest rotated logs. A rerun of install.sh keeps the service's run user unless `--run-user` says
+otherwise.
 
 ## Layout
 
@@ -308,7 +322,9 @@ elevated prompt:
 icacls C:\ProgramData\telemetry\secrets /inheritance:r /grant:r "SYSTEM:(OI)(CI)F" "Administrators:(OI)(CI)F"
 ```
 
-(The installer doesn't create or touch this folder on Windows.)
+From the release with the self-updater (OPS-75), install.sh does this itself: it locks
+`secrets\` (and the install dir, which SYSTEM runs) to SYSTEM and Administrators, with
+Administrators as owner, and stops if icacls fails.
 
 ### What is sent
 
