@@ -52,7 +52,9 @@ cd "$DIR" && sudo ./update.sh && sudo ./install.sh; rm -f "$KH"
 On Windows the secrets folder is locked to SYSTEM and Administrators **before** the key is made,
 so the key never inherits Users:RX.
 
-(On Windows, drop the `sudo`.) `update.sh` checks out the newest release tag, and
+(On Windows, drop the `sudo`. Or skip Git Bash: from cmd, PowerShell or a double-click, run
+`update.cmd` and `install.cmd`, which find Git Bash in Program Files, ask for Administrator rights,
+and pass their arguments through, e.g. `install.cmd --ring canary`.) `update.sh` checks out the newest release tag, and
 `install.sh` asks for the MQTT broker (or `none` for a Pane-only box), the optional Pane URL,
 which collectors this box runs (NVIDIA / LHM / Arc GPUs) and the model-label source. It then
 writes `.env`, builds the venv and registers the service: a **systemd timer** on Linux
@@ -85,7 +87,7 @@ sudo ./install.sh --reconfigure
 ## Update
 
 ```bash
-cd /opt/telemetry   # or  cd /c/telemetry (elevated Git Bash)
+cd /opt/telemetry   # or  cd /c/telemetry (elevated Git Bash), or on Windows: C:\telemetry\update.cmd
 sudo ./update.sh                     # the newest vX.Y.Z tag
 sudo ./update.sh v1.4.0              # or a specific one (not older than the installed one)
 sudo ./update.sh --rollback v1.4.0   # back to an older one, on purpose
