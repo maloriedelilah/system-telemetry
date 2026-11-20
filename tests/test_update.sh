@@ -255,6 +255,21 @@ bash "$box/update.sh" >"$out" 2>&1 && fail "it went back to v1.10.0 on its own" 
 check "it refuses the older newest tag" has '!!! v1.10.0 is older than this box'"'"'s v1.11.0'
 check "it stays at v1.11.0" test "$(at)" = v1.11.0
 
+echo "== update.sh: finish installs from the hashed lock when the release has one (OPS-75)"
+fin="$work/finbox"; mkdir -p "$fin/venv/bin" "$work/finbin"
+cp "$SRC/update.sh" "$SRC/requirements.txt" "$SRC/requirements.lock" "$fin/"
+"${G[@]}" -C "$fin" init -q
+printf '#!/bin/bash\nprintf "%%s\\n" "$*" >>"%s/pip-args"\n' "$work" >"$fin/venv/bin/python"
+printf '#!/bin/bash\nexit 0\n' >"$work/finbin/systemctl"
+chmod +x "$fin/venv/bin/python" "$work/finbin/systemctl"
+PATH="$work/finbin:$PATH" TELEMETRY_SKIP_SERVICE=0 bash "$fin/update.sh" --finish v1.0.0 >"$out" 2>&1 \
+    || fail "finish failed" "$(tail -n 6 "$out")"
+check "pip got --require-hashes --no-deps and the lock" grep -q -- "--require-hashes --no-deps -r $fin/requirements.lock" "$work/pip-args"
+rm -f "$fin/requirements.lock" "$work/pip-args"
+PATH="$work/finbin:$PATH" TELEMETRY_SKIP_SERVICE=0 bash "$fin/update.sh" --finish v1.0.0 >"$out" 2>&1 \
+    || fail "finish without a lock failed" "$(tail -n 6 "$out")"
+check "a release without a lock still uses requirements.txt" grep -q -- "-r $fin/requirements.txt" "$work/pip-args"
+
 echo
 if [ "$FAILS" -gt 0 ]; then echo "UPDATE CHECKS FAILED: $FAILS failure(s), $CHECKS passed" >&2; exit 1; fi
 echo "UPDATE CHECKS PASSED: $CHECKS checks"
