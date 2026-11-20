@@ -644,15 +644,22 @@ if [[ "$OS" == windows ]]; then
     }
     lock_dir() {   # dir, extra grants...
         local d="$1"; shift
-        # Administrators take ownership first. A file owned by the user who cloned it would
-        # otherwise lose the admin access icacls needs half-way through /inheritance:r (Eighty-Eight,
-        # Nov 20: 1,138 of 1,315 files failed). takeown works whatever the DACL says, and an owner can
-        # always set the DACL.
+        # 1. Administrators take ownership. A file owned by the user who cloned it would otherwise
+        #    refuse the admin's permission change (Eighty-Eight, Nov 20: 1,138 of 1,315 files).
+        #    takeown works whatever the DACL says, and an owner can always set the DACL.
         MSYS_NO_PATHCONV=1 takeown /F "$(win "$d")" /A /R /D Y >/dev/null 2>&1 \
             || die "could not make Administrators the owner of $(win "$d") (takeown failed)."
-        icacls_all "$(win "$d")" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "$@" /T \
-            && icacls_all "$(win "$d")" /setowner "*S-1-5-32-544" /T \
+        # 2. The folder itself: no inheritance from above, only these grants, inherited downwards.
+        #    Not /T: with /T, icacls strips the inherited ACEs from every file below and puts the
+        #    grants on the folder alone, leaving the files with an empty DACL that even SYSTEM
+        #    can't read (also Eighty-Eight, Nov 20).
+        icacls_all "$(win "$d")" /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" "$@" \
             || die "could not lock $(win "$d") to SYSTEM and Administrators; icacls said: $(grep -vE '^(processed file|Successfully processed)' <<<"$ICACLS_OUT" | head -n 3 | tr '\n' ' ')"
+        # 3. Everything below goes back to inheriting from the folder, dropping any ACE of its own.
+        if [[ -n "$(ls -A "$d")" ]]; then
+            icacls_all "$(win "$d")\\*" /reset /T \
+                || die "could not reset the permissions under $(win "$d") to inherit; icacls said: $(grep -vE '^(processed file|Successfully processed)' <<<"$ICACLS_OUT" | head -n 3 | tr '\n' ' ')"
+        fi
     }
     lock_dir "$INSTALL_DIR" "*S-1-5-32-545:(OI)(CI)RX"
     say "Locked $(win "$INSTALL_DIR"): SYSTEM and Administrators change it, Users read it."
