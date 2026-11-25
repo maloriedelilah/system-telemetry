@@ -16,7 +16,7 @@ https://blog.authortools.net/  up              # /api/health/ answers 401
 https://corpus.authortools.net/api/health
 https://lens.authortools.net/  up              # no health route yet (SPA answers every path)
 https://bookmockups.authortools.net/  up       # no health route yet
-https://metaapi.authortools.net/api/health
+https://metaapi-mcp.authortools.net/healthz  up   # answers plain "ok", not JSON
 https://amazonapi.authortools.net/healthz  up       # answers plain "ok", not JSON
 https://help.authortools.net/  up              # no health route yet
 
