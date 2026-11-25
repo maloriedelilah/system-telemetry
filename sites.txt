@@ -7,8 +7,8 @@
 
 # authortools.net
 https://write.authortools.net/api/health
-https://accounts.authortools.net/api/health
-https://home.authortools.net/api/health
+https://account.authortools.net/api/health
+https://authortools.net/api/health          # "home": the bare domain
 https://ad-copy.authortools.net/api/health
 https://video.authortools.net/api/health
 https://flightdeck.authortools.net/api/health
