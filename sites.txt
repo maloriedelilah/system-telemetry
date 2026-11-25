@@ -7,8 +7,8 @@
 
 # authortools.net
 https://write.authortools.net/api/health
-https://accounts.authortools.net/api/health
-https://home.authortools.net/api/health
+https://account.authortools.net/api/health
+https://authortools.net/  up                   # "home": the bare domain; no health route (/api/health is 404)
 https://ad-copy.authortools.net/api/health
 https://video.authortools.net/api/health
 https://flightdeck.authortools.net/api/health
@@ -16,7 +16,7 @@ https://blog.authortools.net/  up              # /api/health/ answers 401
 https://corpus.authortools.net/api/health
 https://lens.authortools.net/  up              # no health route yet (SPA answers every path)
 https://bookmockups.authortools.net/  up       # no health route yet
-https://metaapi.authortools.net/api/health
+https://metaapi-mcp.authortools.net/healthz  up   # answers plain "ok", not JSON
 https://amazonapi.authortools.net/healthz  up       # answers plain "ok", not JSON
 https://help.authortools.net/  up              # no health route yet
 
