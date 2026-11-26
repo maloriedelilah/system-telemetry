@@ -234,7 +234,7 @@ if [[ -e "$SIGNERS" ]]; then
         # TrustedInstaller or CREATOR OWNER, on the folder and on the file itself, and the owner
         # Administrators or SYSTEM. An icacls that fails is a refusal, not a pass (OPS-77).
         # Not "target": that's the release tag this run installs (a loop named target replaced the tag with this
-        # path, so every Windows update run by v1.9.0-v1.9.2 was refused as "older than" the installed release; OPS-106).
+        # path, so every Windows update run by v1.9.0-v1.9.2 was refused as "older than" the installed release; OPS-107).
         for aclpath in "$(dirname "$SIGNERS")" "$SIGNERS"; do
             wt="$(cygpath -w "$aclpath")"
             if ! acl="$(MSYS_NO_PATHCONV=1 icacls "$wt" 2>&1)"; then
