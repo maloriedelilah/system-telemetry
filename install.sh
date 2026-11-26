@@ -443,7 +443,15 @@ place_updater_linux() {
     # The parent too, explicitly. GNU install -d makes missing parents 0755, but other implementations
     # (Ubuntu's Rust coreutils) apply this script's umask (077), and a root-only /var/lib/telemetry
     # hides the folder from the service's run user (OPS-109, pane).
-    install -d -o root -g root -m 0755 "$(dirname "$hb")" "$hb"
+    # The default parent is telemetry's own and is set every time (that also repairs a 0700 one). An
+    # overridden folder's parent may belong to something else: it's only created when missing, never
+    # re-owned (Errata, OPS-109 Low).
+    if [[ "$hb" == /var/lib/telemetry/heartbeat ]]; then
+        install -d -o root -g root -m 0755 /var/lib/telemetry
+    elif [[ ! -d "$(dirname "$hb")" ]]; then
+        install -d -o root -g root -m 0755 "$(dirname "$hb")"
+    fi
+    install -d -o root -g root -m 0755 "$hb"
     sed -e "s#__INSTALL_DIR__#$INSTALL_DIR#g" "$INSTALL_DIR/service/autoupdate.service" > "$UNIT_DIR/telemetry-autoupdate.service"
     cp "$INSTALL_DIR/service/autoupdate.timer" "$UNIT_DIR/telemetry-autoupdate.timer"
     if [[ "${TELEMETRY_SKIP_SERVICE:-0}" != 1 ]]; then

@@ -51,6 +51,12 @@ def heartbeat_folders():
                       "a folder this user can read", "permission denied",
                       f"make every folder above it readable, e.g. sudo chmod 755 {os.path.dirname(up)}")
         return folders
+    except OSError as e:
+        # Not a folder (a file in its place), or any other stat failure: report it and carry on with the rest.
+        config.report("The self-updater's heartbeat folder can't be used", f"stat {up}",
+                      "a folder", f"{type(e).__name__}: {e.strerror or e}",
+                      f"check what's at {up}; the updater writes telemetry-update.json there")
+        return folders
     if os.path.isdir(up) and up not in folders:
         folders.append(up)
     return folders

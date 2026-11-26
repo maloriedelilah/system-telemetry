@@ -311,6 +311,10 @@ def test_unreadable_updater_folder_is_reported_not_silent():
     with mock.patch("os.stat", side_effect=FileNotFoundError(2, "No such file")), contextlib.redirect_stderr(err):
         assert main.heartbeat_folders() == []
     assert err.getvalue() == "", "a box without the self-updater says nothing"
+    err = io.StringIO()
+    with mock.patch("os.stat", side_effect=NotADirectoryError(20, "Not a directory")), contextlib.redirect_stderr(err):
+        assert main.heartbeat_folders() == []
+    assert "can't be used" in err.getvalue(), "any other stat error is reported, and the run carries on"
 
 
 def test_version_comes_from_the_version_file():
