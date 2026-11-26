@@ -62,6 +62,24 @@ def heartbeat_folders():
     return folders
 
 
+def sending_kinds(folders):
+    """The kinds of reading this box is set up to send, from its configuration alone (OPS-118).
+
+    Never from what was read this cycle: a GPU that fell off the bus or a disk that vanished must
+    still count as a gap on Pane. The kinds are the first word of the series names Pane gets.
+    """
+    kinds = ["telemetry"]
+    if config.TELEMETRY_NVIDIA or config.TELEMETRY_LHM:
+        kinds.append("gpu")
+    if config.TELEMETRY_LHM or (config.TELEMETRY_HOST and config.IS_LINUX):
+        kinds += ["cpu", "mem", "disk"]
+    if config.TELEMETRY_SITES and not config.LOOP_INTERVAL:
+        kinds.append("site")
+    if folders:
+        kinds.append("heartbeat")
+    return kinds
+
+
 def run_once():
     """One publish cycle. Returns True only if every enabled output succeeded."""
     gpus = nvidia.read_gpus() if config.TELEMETRY_NVIDIA else []
@@ -101,7 +119,8 @@ def run_once():
     # Status files from occasional jobs go to Pane only. Fenced off like an output: a bug here must
     # not cost the host and GPU data.
     beats = []
-    for folder in heartbeat_folders():
+    folders = heartbeat_folders()
+    for folder in folders:
         try:
             beats += heartbeats.read_all(folder)
         except Exception as e:
@@ -138,7 +157,8 @@ def run_once():
         try:
             results.append(pane.push(pane.to_lines(gpus, models, host)
                                      + pane.site_lines(site_results, site_control)
-                                     + pane.heartbeat_lines(beats)))
+                                     + pane.heartbeat_lines(beats)
+                                     + pane.sends_lines(sending_kinds(folders))))
         except Exception as e:
             config.report("Pane output crashed", "build and push the Pane lines",
                           "a push attempt", f"{type(e).__name__}: {e}",

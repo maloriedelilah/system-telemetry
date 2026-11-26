@@ -627,7 +627,9 @@ def test_run_once_probe_crash_does_not_stop_host_data():
         with Capture() as c:
             assert main.run_once() is True
         assert "!!! Site probes crashed" in c.err.getvalue(), c.err.getvalue()
-        assert "mem used_gb=1" in p.bodies[-1] and "site" not in p.bodies[-1], p.bodies
+        assert "mem used_gb=1" in p.bodies[-1] and "\nsite" not in "\n" + p.bodies[-1], p.bodies
+        # No site readings, but the kind stays listed: TELEMETRY_SITES is on (OPS-118).
+        assert "telemetry_sends,kind=site listed=1" in p.bodies[-1], p.bodies
     finally:
         main.sites.probe_all = real
         config.TELEMETRY_SITES = False

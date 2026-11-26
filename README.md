@@ -345,6 +345,14 @@ timestamps and no host tag (Pane adds both). VictoriaMetrics names each series
 | `site,site=<label>,check=<health\|up>` | `up reachable code latency_ms db_ok cert_days` (TELEMETRY_SITES=1; `site_up` is what Pane's Sites page reads) |
 | `site_probe` | `sites healthy control_ok` (TELEMETRY_SITES=1) |
 | `heartbeat,check=<name>` | `ok age_s period_s` (HEARTBEATS_DIR status files) |
+| `telemetry_sends,kind=<kind>` | `listed=1`, one per kind of reading this box is set up to send |
+
+`telemetry_sends` lists the kinds of reading this box is set up to send: `telemetry` always, `gpu`
+with the nvidia or LHM reader on, `cpu`, `mem` and `disk` with host stats on, `site` with site
+probes on, and `heartbeat` when a heartbeat folder exists. A kind is the first word of a series
+name. The list comes from the configuration, never from what was read in that cycle, so a card or
+disk that drops out still shows as a gap on Pane. A kind that is switched off stops counting as a
+gap at the next push.
 
 Readings that are missing or not finite are left out. The GPU memory percentage is
 `mem_pct`, not `mem_used_*`, on purpose: the dashboard takes the max of every series

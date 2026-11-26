@@ -15,6 +15,13 @@ series <measurement>_<field>; the names below are fixed by Pane's fleet dashboar
   disk,disk=<name>               temp_c used_percent
   telemetry                      up=1 gpus=<n>    (heartbeat, every cycle)
   heartbeat,check=<name>         ok age_s period_s   (HEARTBEATS_DIR status files)
+  telemetry_sends,kind=<kind>    listed=1         (one per kind this box is set up to send, every cycle)
+
+telemetry_sends tells Pane which kinds of reading this box is set up to send: gpu, cpu, mem,
+disk, site, heartbeat and telemetry, the first word of each series name. It follows the
+configuration, never what was detected this cycle, so a card or disk that drops out still shows as
+a gap on Pane, while a kind that was switched off (TELEMETRY_SITES=0, say) stops counting as one
+at the next push (OPS-118).
 
 With TELEMETRY_SITES=1 (pane only), site_lines() adds the site probes:
 
@@ -189,6 +196,11 @@ def site_lines(results, control):
         if line:
             lines.append(line)
     return lines
+
+
+def sends_lines(kinds):
+    """One telemetry_sends line per kind this box is set up to send, in a fixed order."""
+    return [f"telemetry_sends,kind={_tag(k)} listed=1" for k in sorted(set(kinds or []))]
 
 
 def heartbeat_lines(checks):

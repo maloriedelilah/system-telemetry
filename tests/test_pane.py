@@ -525,8 +525,55 @@ def test_run_once_both_ok():
             assert main.run_once() is True
         assert len(p.requests) == 1 and FakeMQTT.published > 0
         out = c.out.getvalue().splitlines()
-        assert out[0] == "Pane: pushed 6 lines for slimridge (204)", out     # Pane first
+        assert out[0] == "Pane: pushed 11 lines for slimridge (204)", out    # Pane first; 6 + 5 telemetry_sends
         assert out[1].startswith("Published 1 GPU(s) + host stats for slimridge:"), out
+    finally:
+        p.stop()
+
+
+def test_sends_lines_sorted_unique_and_fixed_shape():
+    assert pane.sends_lines(["telemetry", "gpu", "cpu", "gpu"]) == [
+        "telemetry_sends,kind=cpu listed=1", "telemetry_sends,kind=gpu listed=1",
+        "telemetry_sends,kind=telemetry listed=1"]
+    assert pane.sends_lines([]) == [] and pane.sends_lines(None) == []
+
+
+def test_sending_kinds_follow_the_configuration():
+    saved = (config.TELEMETRY_NVIDIA, config.TELEMETRY_LHM, config.TELEMETRY_HOST, config.IS_LINUX,
+             config.TELEMETRY_SITES, config.LOOP_INTERVAL)
+    try:
+        def kinds(nv, lhm, host, linux, sites, loop, folders):
+            (config.TELEMETRY_NVIDIA, config.TELEMETRY_LHM, config.TELEMETRY_HOST, config.IS_LINUX,
+             config.TELEMETRY_SITES, config.LOOP_INTERVAL) = nv, lhm, host, linux, sites, loop
+            return main.sending_kinds(folders)
+        # A Linux GPU box with host stats and a heartbeat folder.
+        assert kinds(True, False, True, True, False, "", ["/hb"]) == ["telemetry", "gpu", "cpu", "mem", "disk", "heartbeat"]
+        # Windows with LHM: GPUs and host stats come from LHM.
+        assert kinds(False, True, False, False, False, "60", []) == ["telemetry", "gpu", "cpu", "mem", "disk"]
+        # Sites are listed only when they would really be probed (never in loop mode).
+        assert kinds(False, False, False, True, True, "", []) == ["telemetry", "site"]
+        assert kinds(False, False, False, True, True, "60", []) == ["telemetry"]
+        # TELEMETRY_HOST on a non-Linux box sends no host stats, so lists none.
+        assert kinds(False, False, True, False, False, "", []) == ["telemetry"]
+    finally:
+        (config.TELEMETRY_NVIDIA, config.TELEMETRY_LHM, config.TELEMETRY_HOST, config.IS_LINUX,
+         config.TELEMETRY_SITES, config.LOOP_INTERVAL) = saved
+
+
+def test_run_once_lists_kinds_from_config_not_from_what_was_read():
+    p = Pane()
+    try:
+        setup(p.url)
+        patch_cycle(mqtt_host="")
+        main.nvidia.read_gpus = lambda: []        # the card fell off the bus this cycle
+        with Capture():
+            main.run_once()
+        body = p.requests[-1]["body"].splitlines()
+        sends = [ln for ln in body if ln.startswith("telemetry_sends,")]
+        assert sends == ["telemetry_sends,kind=cpu listed=1", "telemetry_sends,kind=disk listed=1",
+                         "telemetry_sends,kind=gpu listed=1", "telemetry_sends,kind=mem listed=1",
+                         "telemetry_sends,kind=telemetry listed=1"], sends
+        assert not any(ln.startswith("gpu,") for ln in body), body   # no GPU readings, but gpu still listed
     finally:
         p.stop()
 
@@ -539,7 +586,7 @@ def test_run_once_mqtt_failing_still_pushes_to_pane():
         with Capture() as c:
             assert main.run_once() is False
         assert len(p.requests) == 1, "Pane must still be pushed when MQTT is down"
-        assert "Pane: pushed 6 lines" in c.out.getvalue()
+        assert "Pane: pushed 11 lines" in c.out.getvalue()
         assert "MQTT connect() raised" in c.err.getvalue()
     finally:
         p.stop()
