@@ -157,7 +157,13 @@ check "the updater unit names this install dir" grep -qx "Environment=TELEMETRY_
 check "and its timer is there" test -f "$work/units/telemetry-autoupdate.timer"
 check "the heartbeat folder exists, root's 0755" test "$(stat -c '%U %a' "$work/varlib/telemetry/heartbeat")" = "root 755"
 check "and its parent is 0755 too, so the run user can reach it (OPS-109)" test "$(stat -c '%U %a' "$work/varlib/telemetry")" = "root 755"
-check "install.sh sets the parent's mode itself, not leaving it to install -d (OPS-109)" grep -qF 'install -d -o root -g root -m 0755 "$(dirname "$hb")" "$hb"' "$box/install.sh"
+check "and its parent is created 0755 when missing (OPS-109)" grep -qF 'install -d -o root -g root -m 0755 "$(dirname "$hb")"' "$box/install.sh"
+check "the default parent is set every time, repairing a root-only one (OPS-109)" grep -qF 'install -d -o root -g root -m 0755 /var/lib/telemetry' "$box/install.sh"
+# An overridden folder's existing parent is left as it is (Errata, OPS-109 Low).
+chmod 0750 "$work/varlib/telemetry"
+run --profile host --pane-url "$URL" --run-user "$USER_T" || fail "rerun for the parent check failed" "$(tail -n 6 "$out")"
+check "an overridden folder's existing parent is not re-owned or re-moded (OPS-109 Low)" test "$(stat -c '%a' "$work/varlib/telemetry")" = 750
+chmod 0755 "$work/varlib/telemetry"
 
 echo "== --ring sets the update ring; a rerun keeps it; a new --ring replaces it (OPS-75)"
 printf '%s\n' "$TOKEN" | run --profile host --pane-url "$URL" --run-user "$USER_T" --token-stdin --ring canary \
