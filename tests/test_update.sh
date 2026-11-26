@@ -270,6 +270,15 @@ PATH="$work/finbin:$PATH" TELEMETRY_SKIP_SERVICE=0 bash "$fin/update.sh" --finis
     || fail "finish without a lock failed" "$(tail -n 6 "$out")"
 check "a release without a lock still uses requirements.txt" grep -q -- "-r $fin/requirements.txt" "$work/pip-args"
 
+echo "== update.sh: only the argument and the tag lookup set target (OPS-107)"
+# A Windows-only loop named "target" replaced the release tag with a file path, so every unattended Windows
+# update was refused as "older than" the installed release. The Windows branch can't run here; this keeps
+# any other line from assigning the tag.
+n_assign="$(grep -cE '^[[:space:]]*(for[[:space:]]+target[[:space:]]|target=|read[^#]*[[:space:]]target([[:space:]]|$))' "$SRC/update.sh")"
+check "exactly two lines set target (the argument, and the newest-tag lookup)" test "$n_assign" = 2
+check "the tag is checked again just before it is used" grep -q 'the release tag changed during the run' "$SRC/update.sh"
+check "the Windows ACL loop uses its own variable" grep -q 'for aclpath in "$(dirname "$SIGNERS")" "$SIGNERS"' "$SRC/update.sh"
+
 echo
 if [ "$FAILS" -gt 0 ]; then echo "UPDATE CHECKS FAILED: $FAILS failure(s), $CHECKS passed" >&2; exit 1; fi
 echo "UPDATE CHECKS PASSED: $CHECKS checks"

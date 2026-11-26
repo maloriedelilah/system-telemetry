@@ -233,8 +233,10 @@ if [[ -e "$SIGNERS" ]]; then
         # An allowlist, not a denylist (Errata, OPS-75 L2): every ACE must be SYSTEM, Administrators,
         # TrustedInstaller or CREATOR OWNER, on the folder and on the file itself, and the owner
         # Administrators or SYSTEM. An icacls that fails is a refusal, not a pass (OPS-77).
-        for target in "$(dirname "$SIGNERS")" "$SIGNERS"; do
-            wt="$(cygpath -w "$target")"
+        # Not "target": that's the release tag this run installs (a loop named target replaced the tag with this
+        # path, so every Windows update run by v1.9.0-v1.9.2 was refused as "older than" the installed release; OPS-107).
+        for aclpath in "$(dirname "$SIGNERS")" "$SIGNERS"; do
+            wt="$(cygpath -w "$aclpath")"
             if ! acl="$(MSYS_NO_PATHCONV=1 icacls "$wt" 2>&1)"; then
                 report "could not read the trusted signers' permissions" "icacls $wt" "its ACL" "$(tr '\n' ' ' <<<"$acl" | cut -c1-200)" \
                     "run this from an elevated Git Bash; if it still fails, tell Hopper. Nothing was changed."
@@ -302,6 +304,12 @@ if [[ "$converting" == 0 ]]; then
 fi
 
 # --- which tag --------------------------------------------------------------
+# The argument was checked above; check again here, so nothing between there and here can have changed it.
+if [[ -n "$target" && ! "$target" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+    report "the release tag changed during the run" "re-read the tag after the signers checks" "vX.Y.Z" "'$target'" \
+        "this is a bug in update.sh: tell Hopper. Nothing was changed."
+    exit 2
+fi
 if [[ -z "$target" ]]; then
     if ! tags="$(gx ls-remote --tags --refs "$REPO_URL" 'v*' 2>"$tmp/err")"; then
         report "could not list the releases" "git ls-remote --tags $REPO_URL" "the repo's vX.Y.Z tags" "$(tr '\n' ' ' <"$tmp/err")" \
