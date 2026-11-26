@@ -297,6 +297,22 @@ def test_heartbeat_folders_both_and_no_duplicate():
     assert main.heartbeat_folders() == []
 
 
+def test_unreadable_updater_folder_is_reported_not_silent():
+    # OPS-109: install.sh made /var/lib/telemetry root-only, so the run user couldn't stat the folder and
+    # the updater's heartbeat was silently never sent. It must be reported.
+    import io, contextlib
+    from unittest import mock
+    config.HEARTBEATS_DIR, config.UPDATER_HEARTBEAT_DIR = "", "/var/lib/telemetry/heartbeat"
+    err = io.StringIO()
+    with mock.patch("os.stat", side_effect=PermissionError(13, "Permission denied")), contextlib.redirect_stderr(err):
+        assert main.heartbeat_folders() == []
+    assert "heartbeat folder can't be read" in err.getvalue() and "chmod 755 /var/lib/telemetry" in err.getvalue(), err.getvalue()
+    err = io.StringIO()
+    with mock.patch("os.stat", side_effect=FileNotFoundError(2, "No such file")), contextlib.redirect_stderr(err):
+        assert main.heartbeat_folders() == []
+    assert err.getvalue() == "", "a box without the self-updater says nothing"
+
+
 def test_version_comes_from_the_version_file():
     # update.sh's finish writes VERSION; telemetry prints "telemetry <tag>" for the updater's check.
     real = config.INSTALL_DIR

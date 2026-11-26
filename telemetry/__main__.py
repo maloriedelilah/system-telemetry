@@ -39,8 +39,20 @@ dbg = config.dbg
 def heartbeat_folders():
     """HEARTBEATS_DIR when set, and the self-updater's folder whenever it exists (OPS-75)."""
     folders = [d for d in (config.HEARTBEATS_DIR,) if d]
-    if os.path.isdir(config.UPDATER_HEARTBEAT_DIR) and config.UPDATER_HEARTBEAT_DIR not in folders:
-        folders.append(config.UPDATER_HEARTBEAT_DIR)
+    up = config.UPDATER_HEARTBEAT_DIR
+    try:
+        os.stat(up)
+    except FileNotFoundError:
+        return folders                    # no self-updater on this box: nothing to read, nothing to say
+    except PermissionError:
+        # It's there but this user can't reach it (OPS-109: a root-only /var/lib/telemetry), so the
+        # updater's heartbeat would silently never be sent. Say so every run until it's fixed.
+        config.report("The self-updater's heartbeat folder can't be read", f"stat {up}",
+                      "a folder this user can read", "permission denied",
+                      f"make every folder above it readable, e.g. sudo chmod 755 {os.path.dirname(up)}")
+        return folders
+    if os.path.isdir(up) and up not in folders:
+        folders.append(up)
     return folders
 
 

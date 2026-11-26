@@ -24,7 +24,7 @@ export TELEMETRY_SKIP_SERVICE=1
 # The updater pieces land outside the box (OPS-75); point them at the test's own folders.
 mkdir -p "$work/units" "$work/sbin" "$work/etc"
 export TELEMETRY_UNIT_DIR="$work/units" TELEMETRY_SBIN="$work/sbin" \
-       TELEMETRY_ALLOWED_SIGNERS="$work/etc/allowed_signers" TELEMETRY_UPDATER_HEARTBEAT_DIR="$work/hb"
+       TELEMETRY_ALLOWED_SIGNERS="$work/etc/allowed_signers" TELEMETRY_UPDATER_HEARTBEAT_DIR="$work/varlib/telemetry/heartbeat"   # parent missing on purpose (OPS-109)
 URL="http://100.92.61.42:8427"
 TOKEN="pw_$(head -c 30 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 40)"
 run() { bash "$box/install.sh" "$@" >"$out" 2>&1; }
@@ -155,7 +155,9 @@ check "the runner copied" cmp -s "$box/autoupdate.sh" "$work/sbin/telemetry-auto
 check "root's, 0755" test "$(stat -c '%U %a' "$work/sbin/telemetry-autoupdate")" = "root 755"
 check "the updater unit names this install dir" grep -qx "Environment=TELEMETRY_DIR=$box" "$work/units/telemetry-autoupdate.service"
 check "and its timer is there" test -f "$work/units/telemetry-autoupdate.timer"
-check "the heartbeat folder exists, root's 0755" test "$(stat -c '%U %a' "$work/hb")" = "root 755"
+check "the heartbeat folder exists, root's 0755" test "$(stat -c '%U %a' "$work/varlib/telemetry/heartbeat")" = "root 755"
+check "and its parent is 0755 too, so the run user can reach it (OPS-109)" test "$(stat -c '%U %a' "$work/varlib/telemetry")" = "root 755"
+check "install.sh sets the parent's mode itself, not leaving it to install -d (OPS-109)" grep -qF 'install -d -o root -g root -m 0755 "$(dirname "$hb")" "$hb"' "$box/install.sh"
 
 echo "== --ring sets the update ring; a rerun keeps it; a new --ring replaces it (OPS-75)"
 printf '%s\n' "$TOKEN" | run --profile host --pane-url "$URL" --run-user "$USER_T" --token-stdin --ring canary \
