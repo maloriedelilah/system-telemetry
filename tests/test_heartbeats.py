@@ -244,7 +244,9 @@ def test_run_once_crash_in_reader_does_not_stop_host_data():
         with Capture() as c:
             assert main.run_once() is True
         assert "!!! Heartbeat files crashed" in c.err.getvalue(), c.err.getvalue()
-        assert "mem used_gb=1" in p.bodies[-1] and "heartbeat" not in p.bodies[-1], p.bodies
+        # No heartbeat readings, but the kind stays listed: the folder is configured (OPS-118).
+        assert "mem used_gb=1" in p.bodies[-1] and "\nheartbeat," not in "\n" + p.bodies[-1], p.bodies
+        assert "telemetry_sends,kind=heartbeat listed=1" in p.bodies[-1], p.bodies
     finally:
         main.heartbeats.read_all = real
         config.HEARTBEATS_DIR = ""
