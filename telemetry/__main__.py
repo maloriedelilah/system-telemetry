@@ -75,7 +75,7 @@ def sending_kinds(folders):
         kinds += ["cpu", "mem", "disk"]
     if config.TELEMETRY_SITES and not config.LOOP_INTERVAL:
         kinds.append("site")
-    if folders:
+    if folders:   # HEARTBEATS_DIR when set (even if missing: then it's a gap), the updater's folder if it exists
         kinds.append("heartbeat")
     return kinds
 

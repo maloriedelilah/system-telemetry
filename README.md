@@ -349,7 +349,8 @@ timestamps and no host tag (Pane adds both). VictoriaMetrics names each series
 
 `telemetry_sends` lists the kinds of reading this box is set up to send: `telemetry` always, `gpu`
 with the nvidia or LHM reader on, `cpu`, `mem` and `disk` with host stats on, `site` with site
-probes on, and `heartbeat` when a heartbeat folder exists. A kind is the first word of a series
+probes on, and `heartbeat` when `HEARTBEATS_DIR` is set (even if that folder is missing, which then
+shows as a gap) or the self-updater's folder exists. A kind is the first word of a series
 name. The list comes from the configuration, never from what was read in that cycle, so a card or
 disk that drops out still shows as a gap on Pane. A kind that is switched off stops counting as a
 gap at the next push.
