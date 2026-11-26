@@ -440,7 +440,10 @@ place_updater_linux() {
         return 0
     fi
     install -o root -g root -m 0755 "$INSTALL_DIR/autoupdate.sh" "$SBIN_DIR/telemetry-autoupdate"
-    install -d -o root -g root -m 0755 "$hb"
+    # The parent too, explicitly. GNU install -d makes missing parents 0755, but other implementations
+    # (Ubuntu's Rust coreutils) apply this script's umask (077), and a root-only /var/lib/telemetry
+    # hides the folder from the service's run user (OPS-109, pane).
+    install -d -o root -g root -m 0755 "$(dirname "$hb")" "$hb"
     sed -e "s#__INSTALL_DIR__#$INSTALL_DIR#g" "$INSTALL_DIR/service/autoupdate.service" > "$UNIT_DIR/telemetry-autoupdate.service"
     cp "$INSTALL_DIR/service/autoupdate.timer" "$UNIT_DIR/telemetry-autoupdate.timer"
     if [[ "${TELEMETRY_SKIP_SERVICE:-0}" != 1 ]]; then
